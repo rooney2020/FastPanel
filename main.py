@@ -1586,6 +1586,7 @@ class CalendarWidget(CompBase):
     def _go_today(self):
         today = datetime.date.today()
         self._year = today.year; self._month = today.month
+        self._selected = None
         self._refresh()
 
     def _refresh(self):
@@ -1667,6 +1668,12 @@ class CalendarWidget(CompBase):
                         ll.setStyleSheet(f"color:{C['peach']}; font-size:8px; font-weight:bold;")
                     else:
                         ll.setStyleSheet(f"color:{C['overlay0']}; font-size:8px;")
+                elif is_other and holiday_name:
+                    dl.setStyleSheet(f"color:{C['green']}; font-size:13px; opacity:0.7;")
+                    ll.setStyleSheet(f"color:{C['green']}; font-size:8px; font-weight:bold;")
+                elif is_other and is_workday:
+                    dl.setStyleSheet(f"color:{C['peach']}; font-size:13px; opacity:0.7;")
+                    ll.setStyleSheet(f"color:{C['peach']}; font-size:8px; font-weight:bold;")
                 elif is_other:
                     dl.setStyleSheet(f"color:{C['surface2']}; font-size:13px;")
                     ll.setStyleSheet(f"color:{C['surface2']}; font-size:8px;")
@@ -1674,7 +1681,7 @@ class CalendarWidget(CompBase):
                     dl.setStyleSheet(f"color:{C['green']}; font-size:13px; font-weight:bold;")
                     ll.setStyleSheet(f"color:{C['green']}; font-size:8px; font-weight:bold;")
                 elif is_workday:
-                    dl.setStyleSheet(f"color:{C['text']}; font-size:13px; font-weight:bold;")
+                    dl.setStyleSheet(f"color:{C['peach']}; font-size:13px; font-weight:bold;")
                     ll.setStyleSheet(f"color:{C['peach']}; font-size:8px; font-weight:bold;")
                 elif is_weekend:
                     dl.setStyleSheet(f"color:{C['red']}; font-size:13px; font-weight:bold;")
@@ -1737,48 +1744,43 @@ def _wind_dir_from_deg(deg):
             "南", "南偏西", "西南", "西偏南", "西", "西偏北", "西北", "北偏西"]
     return dirs[round(deg / 22.5) % 16]
 
+_CN_WEATHER_ICON = {
+    "晴": ("☀", "#FFA726"), "多云": ("⛅", "#78909C"), "阴": ("☁", "#90A4AE"),
+    "雾": ("🌫", "#B0BEC5"), "霾": ("🌫", "#8D6E63"),
+    "小雨": ("🌧", "#42A5F5"), "中雨": ("🌧", "#1E88E5"), "大雨": ("🌧", "#1565C0"),
+    "暴雨": ("⛈", "#0D47A1"), "大暴雨": ("⛈", "#0D47A1"), "特大暴雨": ("⛈", "#0D47A1"),
+    "阵雨": ("🌦", "#42A5F5"), "雷阵雨": ("⛈", "#7E57C2"),
+    "小雪": ("❄", "#90CAF9"), "中雪": ("❄", "#64B5F6"), "大雪": ("❄", "#42A5F5"),
+    "暴雪": ("❄", "#1E88E5"), "阵雪": ("❄", "#90CAF9"),
+    "雨夹雪": ("🌨", "#78909C"), "冻雨": ("🌧", "#4FC3F7"),
+    "浮尘": ("💨", "#BCAAA4"), "扬沙": ("💨", "#A1887F"), "沙尘暴": ("💨", "#795548"),
+}
+
+def _cn_weather_icon(text):
+    for key, val in _CN_WEATHER_ICON.items():
+        if key in text:
+            return val
+    return ("☁", "#90A4AE")
+
 class _WeatherFetcher(QThread):
     result_ready = pyqtSignal(dict)
 
-    def __init__(self, city):
+    def __init__(self, city_code, city_name=""):
         super().__init__()
-        self._city = city
-
-    def _geo_search(self, name):
-        geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(name)}&count=10&language=zh"
-        req = urllib.request.Request(geo_url, headers={"User-Agent": "FastPanel/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            geo = json.loads(resp.read().decode("utf-8"))
-        return geo.get("results", [])
+        self._code = city_code
+        self._name = city_name
 
     def run(self):
         try:
-            city = self._city.strip()
-            results = []
-            if city and not city.endswith(("市", "县", "区", "州")):
-                results = self._geo_search(city + "市")
-            if not results or max(r.get("population", 0) for r in results) == 0:
-                results = self._geo_search(city) or results
-            if not results:
-                self.result_ready.emit({"_error": f"找不到城市：{self._city}"})
+            url = f"http://t.weather.sojson.com/api/weather/city/{self._code}"
+            req = urllib.request.Request(url, headers={"User-Agent": "FastPanel/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if data.get("status") != 200:
+                self.result_ready.emit({"_error": data.get("message", "API返回错误")})
                 return
-            best = max(results, key=lambda r: r.get("population", 0))
-            lat = best["latitude"]
-            lon = best["longitude"]
-            loc_name = best.get("name", self._city)
-            w_url = (
-                f"https://api.open-meteo.com/v1/forecast?"
-                f"latitude={lat}&longitude={lon}"
-                f"&current=temperature_2m,relative_humidity_2m,apparent_temperature,"
-                f"weather_code,wind_speed_10m,wind_direction_10m"
-                f"&daily=weather_code,temperature_2m_max,temperature_2m_min"
-                f"&forecast_days=16&timezone=auto"
-            )
-            req2 = urllib.request.Request(w_url, headers={"User-Agent": "FastPanel/1.0"})
-            with urllib.request.urlopen(req2, timeout=10) as resp2:
-                wdata = json.loads(resp2.read().decode("utf-8"))
-            wdata["_city_name"] = loc_name
-            self.result_ready.emit(wdata)
+            data["_city_name"] = self._name or data.get("cityInfo", {}).get("city", "")
+            self.result_ready.emit(data)
         except Exception as e:
             self.result_ready.emit({"_error": str(e)})
 
@@ -1862,10 +1864,10 @@ class _TempChartWidget(QWidget):
 
         today = datetime.date.today()
         for i, d in enumerate(self._data):
-            dt = d.get("date"); code = d.get("code", 0)
+            dt = d.get("date"); wtype = d.get("type", "")
             if not dt:
                 continue
-            ic, ic_clr = _wmo_icon(code)
+            ic, ic_clr = _cn_weather_icon(wtype)
             if dt == today:
                 date_str = "今天"
             else:
@@ -1887,9 +1889,8 @@ class _TempChartWidget(QWidget):
 
             d = self._data[hi]
             dt = d.get("date")
-            code = d.get("code", 0)
-            ic, ic_clr = _wmo_icon(code)
-            desc = _wmo_desc(code)
+            wtype = d.get("type", "")
+            ic, ic_clr = _cn_weather_icon(wtype)
             weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
             if dt:
                 if dt == today:
@@ -1898,7 +1899,11 @@ class _TempChartWidget(QWidget):
                     title = f"{dt.month}/{dt.day} {weekdays[dt.weekday()]}"
             else:
                 title = "?"
-            lines = [title, f"{ic} {desc}", f"最高 {d['max']}°  最低 {d['min']}°"]
+            lines = [title, f"{ic} {wtype}"]
+            lines.append(f"最高 {d['max']}°  最低 {d['min']}°")
+            if d.get("fx"): lines.append(f"{d['fx']} {d.get('fl','')}")
+            if d.get("aqi"): lines.append(f"AQI {d['aqi']}")
+            if d.get("notice"): lines.append(d["notice"][:20])
 
             card_f = p.font(); card_f.setPixelSize(12); p.setFont(card_f)
             fm = QFontMetrics(card_f)
@@ -1936,6 +1941,10 @@ class WeatherWidget(CompBase):
     def __init__(self, data, parent=None):
         super().__init__(data, parent)
         self._fetcher = None
+        self._has_data = False
+        self._retry_count = 0
+        self._max_retries = 3
+        self._retry_delays = [5000, 15000, 30000]
         self._build()
         self._fetch_weather()
         self._refresh_timer = QTimer(self)
@@ -1951,6 +1960,11 @@ class WeatherWidget(CompBase):
         self._city_lbl = QLabel(self.data.cmd.strip() or "大连")
         self._city_lbl.setStyleSheet(f"color:{C['text']}; font-size:13px; font-weight:bold;")
         top.addWidget(self._city_lbl)
+        self._err_icon = QLabel("⚠")
+        self._err_icon.setStyleSheet(f"color:{C['red']}; font-size:12px; background:transparent;")
+        self._err_icon.setCursor(Qt.WhatsThisCursor)
+        self._err_icon.hide()
+        top.addWidget(self._err_icon)
         top.addStretch()
         rb = QPushButton("↻"); rb.setFixedSize(24, 24); rb.setCursor(Qt.PointingHandCursor)
         rb.setToolTip("刷新"); rb.setStyleSheet(f"background:transparent; color:{C['subtext0']}; border:none; font-size:16px; font-weight:bold;")
@@ -1988,72 +2002,114 @@ class WeatherWidget(CompBase):
 
 
 
+    def _parse_city_cmd(self):
+        raw = self.data.cmd.strip()
+        if "|" in raw:
+            code, name = raw.split("|", 1)
+            return code.strip(), name.strip()
+        for c in _CITY_DB:
+            if c["name"] == raw or c["city"] == raw:
+                return c["code"], c["name"]
+        return "", raw or "大连"
+
     def _fetch_weather(self):
-        city = self.data.cmd.strip() if self.data.cmd.strip() else "大连"
-        self._city_lbl.setText(city)
-        self._desc_lbl.setText("加载中…")
-        self._temp_lbl.setText("--")
-        self._detail_lbl.setText("")
-        self._icon_lbl.setText("")
-        self._chart.set_data([])
-        self._fetcher = _WeatherFetcher(city)
+        code, name = self._parse_city_cmd()
+        self._city_lbl.setText(name)
+        if not code:
+            if not self._has_data:
+                self._desc_lbl.setText("请选择城市")
+                self._desc_lbl.setStyleSheet(f"color:{C['peach']}; font-size:13px;")
+            return
+        if not self._has_data:
+            self._desc_lbl.setText("加载中…")
+            self._temp_lbl.setText("--")
+            self._detail_lbl.setText("")
+            self._icon_lbl.setText("")
+            self._chart.set_data([])
+        self._fetcher = _WeatherFetcher(code, name)
         self._fetcher.result_ready.connect(self._on_result)
         self._fetcher.start()
 
     def _on_result(self, data):
         if "_error" in data:
-            self._desc_lbl.setText("获取失败")
-            self._detail_lbl.setText(str(data["_error"]))
-            self._desc_lbl.setStyleSheet(f"color:{C['red']}; font-size:13px;")
+            err_msg = str(data["_error"])
+            if self._has_data:
+                self._err_icon.setToolTip(f"刷新失败: {err_msg}")
+                self._err_icon.show()
+            else:
+                if self._retry_count < self._max_retries:
+                    delay = self._retry_delays[min(self._retry_count, len(self._retry_delays)-1)]
+                    self._retry_count += 1
+                    self._desc_lbl.setText(f"加载失败，{delay//1000}秒后重试({self._retry_count}/{self._max_retries})…")
+                    self._desc_lbl.setStyleSheet(f"color:{C['peach']}; font-size:13px;")
+                    QTimer.singleShot(delay, self._fetch_weather)
+                else:
+                    self._desc_lbl.setText("获取失败")
+                    self._detail_lbl.setText(err_msg)
+                    self._desc_lbl.setStyleSheet(f"color:{C['red']}; font-size:13px;")
             return
+        self._has_data = True
+        self._retry_count = 0
+        self._err_icon.hide()
         city_name = data.get("_city_name", "")
         if city_name:
             self._city_lbl.setText(city_name)
 
-        cur = data.get("current", {})
-        temp = cur.get("temperature_2m", "?")
-        feels = cur.get("apparent_temperature", "?")
-        humidity = cur.get("relative_humidity_2m", "?")
-        wcode = cur.get("weather_code", 0)
-        wind_speed = cur.get("wind_speed_10m", "?")
-        wind_deg = cur.get("wind_direction_10m", 0)
-        wind_dir = _wind_dir_from_deg(wind_deg) if isinstance(wind_deg, (int, float)) else ""
-        desc = _wmo_desc(wcode)
-        ic, ic_clr = _wmo_icon(wcode)
+        d = data.get("data", {})
+        temp = d.get("wendu", "?")
+        humidity = d.get("shidu", "?")
+        quality = d.get("quality", "")
+        pm25 = d.get("pm25", "")
+        ganmao = d.get("ganmao", "")
 
-        daily = data.get("daily", {})
-        dates = daily.get("time", [])
-        maxts = daily.get("temperature_2m_max", [])
-        mints = daily.get("temperature_2m_min", [])
-        wcodes = daily.get("weather_code", [])
+        forecast = d.get("forecast", [])
+        today = forecast[0] if forecast else {}
+        today_type = today.get("type", "")
+        today_high = today.get("high", "").replace("高温 ", "").replace("℃", "")
+        today_low = today.get("low", "").replace("低温 ", "").replace("℃", "")
+        today_fx = today.get("fx", "")
+        today_fl = today.get("fl", "")
 
-        today_range = ""
-        if dates and maxts and mints:
-            today_range = f"  {mints[0]}~{maxts[0]}°C"
+        ic, ic_clr = _cn_weather_icon(today_type)
+        today_range = f"  {today_low}~{today_high}°C" if today_high and today_low else ""
 
         self._temp_lbl.setText(f"{temp}°")
         self._temp_lbl.setStyleSheet(f"color:{C['text']}; font-size:36px; font-weight:bold;")
-        self._desc_lbl.setText(f"{desc}{today_range}")
+        self._desc_lbl.setText(f"{today_type}{today_range}")
         self._desc_lbl.setStyleSheet(f"color:{C['text']}; font-size:13px;")
-        self._detail_lbl.setText(f"体感 {feels}°C  湿度 {humidity}%  {wind_dir}风 {wind_speed}km/h")
+        detail_parts = [f"湿度 {humidity}"]
+        if today_fx: detail_parts.append(f"{today_fx}{today_fl}")
+        if quality: detail_parts.append(f"空气{quality}")
+        if pm25: detail_parts.append(f"PM2.5 {pm25}")
+        self._detail_lbl.setText("  ".join(detail_parts))
         self._detail_lbl.setStyleSheet(f"color:{C['subtext0']}; font-size:11px;")
         self._icon_lbl.setText(ic)
         self._icon_lbl.setStyleSheet(f"font-size:36px; color:{ic_clr};")
 
         chart_data = []
-        for i in range(min(len(dates), 16)):
+        for item in forecast[:15]:
             try:
-                dt = datetime.datetime.strptime(dates[i], "%Y-%m-%d").date()
+                dt = datetime.datetime.strptime(item.get("ymd", ""), "%Y-%m-%d").date()
             except Exception:
                 dt = None
-            chart_data.append({"date": dt,
-                "max": maxts[i] if i < len(maxts) else 0,
-                "min": mints[i] if i < len(mints) else 0,
-                "code": wcodes[i] if i < len(wcodes) else 0})
+            hi = item.get("high", "").replace("高温 ", "").replace("℃", "")
+            lo = item.get("low", "").replace("低温 ", "").replace("℃", "")
+            try: hi_val = float(hi)
+            except: hi_val = 0
+            try: lo_val = float(lo)
+            except: lo_val = 0
+            chart_data.append({
+                "date": dt, "max": hi_val, "min": lo_val,
+                "type": item.get("type", ""), "fx": item.get("fx", ""),
+                "fl": item.get("fl", ""), "aqi": item.get("aqi", ""),
+                "notice": item.get("notice", "")
+            })
         self._chart.set_data(chart_data)
 
     def update_from_data(self):
-        self._city_lbl.setText(self.data.cmd.strip() or "大连")
+        _, name = self._parse_city_cmd()
+        self._city_lbl.setText(name)
+        self._has_data = False
         self._fetch_weather()
 
 
@@ -3110,40 +3166,33 @@ class GridPanel(QWidget):
         return list(self._components)
 
 
-_CHINA_CITIES = {
-    "A": ["阿克苏","安庆","安阳","鞍山","安康","阿勒泰","阿里"],
-    "B": ["北京","保定","包头","蚌埠","巴中","宝鸡","白城","白山","白银","百色","北海","毕节","滨州","亳州","本溪"],
-    "C": ["成都","重庆","长沙","长春","常州","常德","沧州","承德","郴州","赤峰","池州","崇左","滁州","朝阳","潮州","楚雄","昌都"],
-    "D": ["大连","大庆","东莞","大同","德阳","德州","丹东","定西","大理","达州","儋州","东营","敦煌"],
-    "E": ["鄂州","恩施","鄂尔多斯"],
-    "F": ["福州","佛山","抚州","阜阳","阜新","防城港","抚顺"],
-    "G": ["广州","贵阳","桂林","赣州","广元","广安","固原","甘孜","果洛"],
-    "H": ["杭州","合肥","哈尔滨","海口","呼和浩特","惠州","邯郸","衡阳","淮安","菏泽","衡水","黄冈","黄石","黄山","河源","贺州","红河","怀化","湖州","葫芦岛","鹤岗","鹤壁","海东","海西"],
-    "J": ["济南","金华","嘉兴","吉林","景德镇","荆州","荆门","揭阳","江门","九江","焦作","晋中","晋城","济宁","酒泉","吉安","佳木斯"],
-    "K": ["昆明","开封","喀什","克拉玛依"],
-    "L": ["兰州","拉萨","洛阳","柳州","连云港","临沂","聊城","丽江","六盘水","泸州","廊坊","乐山","辽阳","辽源","龙岩","娄底","漯河","吕梁","六安","临汾","临夏","陇南","林芝","来宾","丽水","莱芜"],
-    "M": ["绵阳","梅州","马鞍山","茂名","眉山","牡丹江"],
-    "N": ["南京","宁波","南昌","南宁","南阳","南充","南通","南平","内江","那曲"],
-    "P": ["平顶山","濮阳","攀枝花","莆田","萍乡","普洱","盘锦"],
-    "Q": ["青岛","泉州","秦皇岛","齐齐哈尔","曲靖","清远","庆阳","衢州","钦州","黔南","黔东南","黔西南","琼海"],
-    "R": ["日照","日喀则"],
-    "S": ["上海","深圳","苏州","沈阳","石家庄","三亚","绍兴","汕头","十堰","遂宁","宿迁","宿州","邵阳","上饶","商丘","商洛","韶关","松原","四平","随州","三明","三门峡","汕尾"],
-    "T": ["天津","太原","台州","唐山","泰安","通辽","铜仁","铜陵","铜川","通化","天水"],
-    "W": ["武汉","无锡","乌鲁木齐","温州","潍坊","威海","芜湖","梧州","渭南","武威","文山","吴忠","万宁"],
-    "X": ["西安","厦门","西宁","徐州","襄阳","咸阳","新乡","信阳","许昌","咸宁","孝感","忻州","兴安盟","锡林郭勒","西双版纳","宣城","湘西","湘潭","邢台"],
-    "Y": ["烟台","银川","宜昌","扬州","岳阳","盐城","宜宾","阳江","玉溪","玉林","益阳","营口","永州","运城","榆林","延安","宜春","延边","伊春","鹰潭","雅安","云浮","玉树"],
-    "Z": ["郑州","珠海","中山","遵义","淄博","湛江","张家口","漳州","舟山","自贡","资阳","株洲","周口","驻马店","肇庆","张掖","张家界","镇江","枣庄","中卫"],
-}
+def _load_city_db():
+    fp = os.path.join(_BASE_DIR, "cities.json")
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+_CITY_DB = _load_city_db()
+
+def _city_db_by_letter():
+    groups = {}
+    for c in _CITY_DB:
+        py = c.get("pinyin", "")
+        letter = py[0].upper() if py else "#"
+        groups.setdefault(letter, []).append(c)
+    return groups
 
 
 class CitySelectDialog(QDialog):
-    def __init__(self, current_city="", parent=None):
+    def __init__(self, current_code="", parent=None):
         super().__init__(parent)
         self.setWindowTitle("选择城市")
-        self.setMinimumSize(480, 520)
+        self.setMinimumSize(520, 560)
         self.setStyleSheet(f"""
             QDialog {{ background: {C['base']}; }}
-            QLabel {{ color: {C['text']}; }}
+            QLabel {{ color: {C['text']}; background: transparent; }}
             QLineEdit {{ background: {C['surface0']}; color: {C['text']}; border: 1px solid {C['surface2']}; border-radius: 6px; padding: 6px 10px; font-size: 13px; }}
             QPushButton#letterBtn {{ background: {C['surface1']}; color: {C['text']}; border: none; border-radius: 4px; font-size: 12px; font-weight: bold; min-width: 28px; min-height: 28px; }}
             QPushButton#letterBtn:hover {{ background: {C['blue']}; color: {C['crust']}; }}
@@ -3154,34 +3203,41 @@ class CitySelectDialog(QDialog):
             QPushButton#cancelBtn {{ background: {C['surface1']}; color: {C['text']}; border: none; border-radius: 8px; padding: 8px 24px; font-size: 13px; }}
             QPushButton#cancelBtn:hover {{ background: {C['surface2']}; }}
         """)
-        self._selected = current_city
-        root = QVBoxLayout(self); root.setSpacing(10)
+        self._selected_code = current_code
+        self._selected_name = ""
+        for c in _CITY_DB:
+            if c["code"] == current_code:
+                self._selected_name = f"{c['province']}-{c['city']}-{c['name']}"
+                break
 
+        root = QVBoxLayout(self); root.setSpacing(10)
         self._search = QLineEdit()
-        self._search.setPlaceholderText("搜索城市名称…")
+        self._search.setPlaceholderText("搜索城市（名称或拼音）…")
         self._search.textChanged.connect(self._filter)
         root.addWidget(self._search)
 
         letter_bar = QHBoxLayout(); letter_bar.setSpacing(3)
         self._letter_anchors = {}
-        for ch in sorted(_CHINA_CITIES.keys()):
+        groups = _city_db_by_letter()
+        for ch in sorted(groups.keys()):
+            if ch == "#": continue
             b = QPushButton(ch); b.setObjectName("letterBtn"); b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _, c=ch: self._scroll_to(c))
             letter_bar.addWidget(b)
         letter_bar.addStretch()
         root.addLayout(letter_bar)
 
-        from PyQt5.QtWidgets import QScrollArea
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setStyleSheet(f"QScrollArea {{ border: none; background: {C['base']}; }}")
         self._content = QWidget()
+        self._content.setStyleSheet(f"background: {C['base']};")
         self._content_lay = QVBoxLayout(self._content)
         self._content_lay.setSpacing(6); self._content_lay.setContentsMargins(4, 4, 4, 4)
         self._scroll.setWidget(self._content)
         root.addWidget(self._scroll, 1)
 
-        self._city_widgets = {}
+        self._city_btns = {}
         self._build_list()
 
         btns = QHBoxLayout(); btns.addStretch()
@@ -3197,14 +3253,19 @@ class CitySelectDialog(QDialog):
             w = item.widget()
             if w: w.deleteLater()
         self._letter_anchors.clear()
-        self._city_widgets.clear()
+        self._city_btns.clear()
         ft = filter_text.strip().lower()
+        groups = _city_db_by_letter()
         from PyQt5.QtWidgets import QGridLayout as _GL
-        for ch in sorted(_CHINA_CITIES.keys()):
-            cities = _CHINA_CITIES[ch]
+        for ch in sorted(groups.keys()):
+            if ch == "#": continue
+            items = groups[ch]
             if ft:
-                cities = [c for c in cities if ft in c.lower()]
-            if not cities:
+                items = [c for c in items if ft in c["name"].lower()
+                         or ft in c.get("pinyin", "").lower()
+                         or ft in c.get("city", "").lower()
+                         or ft in c.get("province", "").lower()]
+            if not items:
                 continue
             lbl = QLabel(ch)
             lbl.setStyleSheet(f"color:{C['blue']}; font-size:14px; font-weight:bold; margin-top:6px;")
@@ -3213,26 +3274,31 @@ class CitySelectDialog(QDialog):
             flow = QWidget()
             gl = _GL(flow); gl.setSpacing(6); gl.setContentsMargins(0, 0, 0, 0)
             col = 0; row = 0
-            for city in cities:
-                b = QPushButton(city); b.setObjectName("cityBtn"); b.setCursor(Qt.PointingHandCursor)
-                if city == self._selected:
+            for c in items:
+                display = c["name"]
+                if c["city"] != c["name"]:
+                    display = f"{c['name']}({c['city']})"
+                b = QPushButton(display); b.setObjectName("cityBtn"); b.setCursor(Qt.PointingHandCursor)
+                b.setToolTip(f"{c['province']} - {c['city']} - {c['name']}")
+                if c["code"] == self._selected_code:
                     b.setStyleSheet(f"background:{C['blue']}; color:{C['crust']}; border:none; border-radius:6px; padding:6px 12px; font-size:12px; font-weight:bold;")
-                b.clicked.connect(lambda _, c=city, btn=b: self._pick(c, btn))
+                b.clicked.connect(lambda _, ci=c, btn=b: self._pick(ci, btn))
                 gl.addWidget(b, row, col)
-                self._city_widgets[city] = b
+                self._city_btns[c["code"]] = b
                 col += 1
-                if col >= 6:
+                if col >= 5:
                     col = 0; row += 1
             self._content_lay.addWidget(flow)
         self._content_lay.addStretch()
 
-    def _pick(self, city, btn):
-        for c, b in self._city_widgets.items():
-            if c == city:
+    def _pick(self, city_info, btn):
+        self._selected_code = city_info["code"]
+        self._selected_name = city_info["name"]
+        for code, b in self._city_btns.items():
+            if code == self._selected_code:
                 b.setStyleSheet(f"background:{C['blue']}; color:{C['crust']}; border:none; border-radius:6px; padding:6px 12px; font-size:12px; font-weight:bold;")
             else:
                 b.setStyleSheet("")
-        self._selected = city
 
     def _scroll_to(self, ch):
         lbl = self._letter_anchors.get(ch)
@@ -3243,7 +3309,10 @@ class CitySelectDialog(QDialog):
         self._build_list(text)
 
     def selected_city(self):
-        return self._selected
+        return self._selected_name
+
+    def selected_code(self):
+        return self._selected_code
 
 
 # ---------------------------------------------------------------------------
@@ -3433,15 +3502,20 @@ def _build_comp_dialog(dialog, heading_text, ok_text, data=None):
     dialog._weather_hint.setStyleSheet(f"color:{C['overlay0']}; font-size:12px;")
     form.addRow("", dialog._weather_hint)
     _city_row = QHBoxLayout(); _city_row.setSpacing(6)
-    dialog.city_edit = QLineEdit(data.cmd if data and data.comp_type == TYPE_WEATHER else "")
+    _init_city_cmd = data.cmd if data and data.comp_type == TYPE_WEATHER else ""
+    _init_code = _init_city_cmd.split("|")[0].strip() if "|" in _init_city_cmd else ""
+    _init_name = _init_city_cmd.split("|")[1].strip() if "|" in _init_city_cmd else _init_city_cmd
+    dialog.city_edit = QLineEdit(_init_name)
     dialog.city_edit.setPlaceholderText("点击右侧按钮选择城市")
     dialog.city_edit.setReadOnly(True)
+    dialog._city_code = _init_code
     _city_row.addWidget(dialog.city_edit)
     _city_pick_btn = QPushButton("选择城市"); _city_pick_btn.setCursor(Qt.PointingHandCursor)
     _city_pick_btn.setStyleSheet(f"background:{C['surface1']}; color:{C['text']}; border:none; border-radius:6px; padding:6px 12px; font-size:12px;")
     def _open_city_dlg():
-        d = CitySelectDialog(dialog.city_edit.text().strip(), dialog)
+        d = CitySelectDialog(getattr(dialog, '_city_code', ''), dialog)
         if d.exec_() == QDialog.Accepted:
+            dialog._city_code = d.selected_code()
             dialog.city_edit.setText(d.selected_city())
     _city_pick_btn.clicked.connect(_open_city_dlg)
     _city_row.addWidget(_city_pick_btn)
@@ -3543,7 +3617,9 @@ def _dlg_get_data(dialog):
     pre = dialog.pre_cmd_edit.toPlainText().strip() if t == TYPE_CMD_WINDOW else ""
     cmd = dialog.cmd_edit.text().strip()
     if t == TYPE_WEATHER:
-        cmd = dialog.city_edit.text().strip() or "大连"
+        city_code = getattr(dialog, '_city_code', '')
+        city_name = dialog.city_edit.text().strip()
+        cmd = f"{city_code}|{city_name}" if city_code else city_name or "大连"
     name = dialog.name_edit.text().strip()
     if not name:
         _defaults = {TYPE_CALENDAR: "日历", TYPE_WEATHER: "天气", TYPE_DOCK: "Dock栏", TYPE_TODO: "待办"}
@@ -3851,10 +3927,6 @@ class SettingsDialog(QDialog):
         opa_lay.addWidget(self.opacity_slider); opa_lay.addWidget(self._opa_label)
         form.addRow("透明度", opa_w)
 
-        self.grid_chk = QCheckBox("显示网格点")
-        self.grid_chk.setChecked(_settings.get("show_grid", True))
-        form.addRow("网  格", self.grid_chk)
-
         lay.addLayout(form); lay.addStretch()
         btns = QHBoxLayout(); btns.addStretch()
         cancel = QPushButton("取消"); cancel.setObjectName("cancelBtn")
@@ -3890,7 +3962,7 @@ class SettingsDialog(QDialog):
             "theme": self.theme_combo.currentText(),
             "bg_image": self.bg_edit.text().strip(),
             "bg_opacity": self.opacity_slider.value(),
-            "show_grid": self.grid_chk.isChecked(),
+            "show_grid": _settings.get("show_grid", True),
         }
 
 
@@ -4000,6 +4072,10 @@ class MainWindow(QMainWindow):
         for txt, slot in [("📥 导入", self._on_import), ("📤 导出", self._on_export)]:
             b = QPushButton(txt); b.setObjectName("ioBtn"); b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(slot); tl.addWidget(b)
+        self._grid_btn = QPushButton("▦"); self._grid_btn.setObjectName("gridBtn")
+        self._grid_btn.setCursor(Qt.PointingHandCursor); self._grid_btn.setToolTip("显示/隐藏网格")
+        self._grid_btn.setProperty("active", _settings.get("show_grid", True))
+        self._grid_btn.clicked.connect(self._toggle_grid); tl.addWidget(self._grid_btn)
         self._lock_btn = QPushButton("🔓"); self._lock_btn.setObjectName("lockBtn")
         self._lock_btn.setCursor(Qt.PointingHandCursor); self._lock_btn.setToolTip("锁定/解锁布局")
         self._lock_btn.clicked.connect(self._toggle_lock); tl.addWidget(self._lock_btn)
@@ -4009,10 +4085,26 @@ class MainWindow(QMainWindow):
         ab = QPushButton("＋  新建组件"); ab.setObjectName("addBtn"); ab.setCursor(Qt.PointingHandCursor)
         ab.clicked.connect(self._on_add); tl.addWidget(ab)
         for txt, oid, slot in [("—", "winMinBtn", self.showMinimized),
-                                ("□", "winMaxBtn", self._toggle_max),
+                                ("", "winMaxBtn", self._toggle_max),
                                 ("✕", "winCloseBtn", self.close)]:
             b = QPushButton(txt); b.setObjectName(oid); b.setFixedSize(36, 28)
             b.setCursor(Qt.PointingHandCursor); b.clicked.connect(slot); tl.addWidget(b)
+            if oid == "winMaxBtn": self._max_btn = b
+        self._max_btn._is_restore = False
+        _orig_paint = self._max_btn.paintEvent
+        def _max_paint(event):
+            _orig_paint(event)
+            pp = QPainter(self._max_btn)
+            pp.setRenderHint(QPainter.Antialiasing)
+            pen = QPen(QColor(C['subtext0']), 1.2)
+            pp.setPen(pen); pp.setBrush(Qt.NoBrush)
+            if self._max_btn._is_restore:
+                pp.drawRect(15, 6, 10, 10)
+                pp.drawRect(11, 11, 10, 10)
+            else:
+                pp.drawRect(12, 8, 12, 12)
+            pp.end()
+        self._max_btn.paintEvent = _max_paint
         root.addWidget(tb)
 
         self._stack = QStackedWidget(); root.addWidget(self._stack, 1)
@@ -4058,6 +4150,16 @@ class MainWindow(QMainWindow):
                 font-size: 12px; margin-right: 4px;
             }}
             #ioBtn:hover {{ background: {C['surface2']}; }}
+            #gridBtn {{
+                background: {C['surface1']}; color: {C['text']};
+                border: none; border-radius: 8px; padding: 8px 12px;
+                font-size: 18px; margin-right: 4px;
+            }}
+            #gridBtn:hover {{ background: {C['surface2']}; }}
+            #gridBtn[active="true"] {{
+                background: {C['blue']}; color: {C['crust']};
+            }}
+            #gridBtn[active="true"]:hover {{ background: {C['lavender']}; color: {C['crust']}; }}
             #lockBtn {{
                 background: {C['surface1']}; color: {C['text']};
                 border: none; border-radius: 8px; padding: 8px 12px;
@@ -4280,27 +4382,27 @@ class MainWindow(QMainWindow):
             return
         if not isinstance(obj, list) or not obj:
             return
-        has_existing = any(len(pd.components) > 0 for pd in self._panels_data.values())
+        has_existing = any(len(pd.components) > 0 for pd in self._panels_data)
         mode = "direct"
         if has_existing:
             dlg = QDialog(self)
             dlg.setWindowTitle("导入方式")
             dlg.setFixedWidth(340)
-            dlg.setStyleSheet(f"QDialog {{ background:{C['base']}; color:{C['text']}; }} QLabel {{ color:{C['text']}; font-size:13px; }}")
-            dl = QVBoxLayout(dlg)
-            dl.addWidget(QLabel("检测到当前已有组件，请选择导入方式："))
-            dl.addSpacing(10)
-            overwrite_btn = QPushButton("覆盖 - 替换所有现有数据")
+            dlg.setStyleSheet(_dialog_style())
+            dl = QVBoxLayout(dlg); dl.setContentsMargins(24, 20, 24, 20); dl.setSpacing(12)
+            lbl = QLabel("检测到当前已有组件，请选择导入方式：")
+            lbl.setStyleSheet(f"color:{C['text']}; font-size:13px;")
+            dl.addWidget(lbl)
+            overwrite_btn = QPushButton("覆盖 — 替换所有现有数据")
             overwrite_btn.setStyleSheet(f"background:{C['red']}; color:{C['crust']}; border:none; border-radius:8px; padding:10px; font-size:13px; font-weight:bold;")
             overwrite_btn.setCursor(Qt.PointingHandCursor)
             overwrite_btn.clicked.connect(lambda: (setattr(dlg, '_mode', 'overwrite'), dlg.accept()))
             dl.addWidget(overwrite_btn)
-            append_btn = QPushButton("新增 - 导入到新面板，保留现有数据")
+            append_btn = QPushButton("新增 — 导入到新面板，保留现有数据")
             append_btn.setStyleSheet(f"background:{C['blue']}; color:{C['crust']}; border:none; border-radius:8px; padding:10px; font-size:13px; font-weight:bold;")
             append_btn.setCursor(Qt.PointingHandCursor)
             append_btn.clicked.connect(lambda: (setattr(dlg, '_mode', 'append'), dlg.accept()))
             dl.addWidget(append_btn)
-            dl.addSpacing(6)
             cancel_btn = QPushButton("取消")
             cancel_btn.setStyleSheet(f"background:{C['surface1']}; color:{C['text']}; border:none; border-radius:8px; padding:8px; font-size:12px;")
             cancel_btn.setCursor(Qt.PointingHandCursor)
@@ -4313,14 +4415,11 @@ class MainWindow(QMainWindow):
         is_panel_format = obj and isinstance(obj[0], dict) and "components" in obj[0]
 
         if mode == "overwrite":
-            for pid in list(self._panels_data.keys()):
-                idx = self._panel_order.index(pid) if pid in self._panel_order else -1
-                if idx >= 0:
-                    self._panel_order.pop(idx)
-                    self._panels_data.pop(pid)
-                    if pid in self._grids:
-                        self._grids[pid].deleteLater()
-                        del self._grids[pid]
+            while len(self._panels_data) > 0:
+                idx = len(self._panels_data) - 1
+                self._panels_data.pop(idx)
+                g = self._grids.pop(idx); s = self._scrolls.pop(idx)
+                g.clear_all(); self._stack.removeWidget(s); s.deleteLater()
             while self._tab_bar.count():
                 self._tab_bar.removeTab(0)
 
@@ -4336,7 +4435,7 @@ class MainWindow(QMainWindow):
                 data = ComponentData.from_dict(d); data.id = str(uuid.uuid4())
                 self._cg().add_component(data)
 
-        if self._panel_order:
+        if self._panels_data:
             self._tab_bar.setCurrentIndex(0)
             self._switch_panel(0)
         self._update_count(); self._sync_sizes(); self._save_data()
@@ -4373,8 +4472,22 @@ class MainWindow(QMainWindow):
     def _toggle_max(self):
         if self.isMaximized():
             self.showNormal()
+            self._max_btn._is_restore = False
         else:
             self.showMaximized()
+            self._max_btn._is_restore = True
+        self._max_btn.update()
+
+    def _toggle_grid(self):
+        show = not _settings.get("show_grid", True)
+        _settings["show_grid"] = show
+        self._grid_btn.setProperty("active", show)
+        self._grid_btn.style().unpolish(self._grid_btn)
+        self._grid_btn.style().polish(self._grid_btn)
+        for g in self._grids:
+            g.set_show_grid(show)
+            g.update()
+        _save_settings(_settings)
 
     def _toggle_lock(self):
         self._locked = not self._locked
@@ -4399,7 +4512,7 @@ class MainWindow(QMainWindow):
             for g in self._grids:
                 pal = g.palette(); pal.setColor(pal.Window, QColor(C["crust"])); g.setPalette(pal)
                 g.set_bg_image(s.get("bg_image", ""), s.get("bg_opacity", 30))
-                g.set_show_grid(s.get("show_grid", True))
+                g.set_show_grid(_settings.get("show_grid", True))
                 for w in g.components:
                     w.setStyleSheet(cs)
                 g.update()
@@ -4417,6 +4530,7 @@ class MainWindow(QMainWindow):
             if self.isMaximized():
                 ratio = e.pos().x() / self.width()
                 self.showNormal()
+                self._max_btn._is_restore = False; self._max_btn.update()
                 new_x = int(self.width() * ratio)
                 self._tb_offset = QPoint(new_x, e.pos().y())
             self.move(e.globalPos() - self._tb_offset)
@@ -4450,7 +4564,9 @@ def main():
             padding: 4px 8px; font-size: 12px;
         }}
     """)
-    win = MainWindow(); win.showMaximized(); sys.exit(app.exec_())
+    win = MainWindow(); win.showMaximized()
+    if hasattr(win, '_max_btn'): win._max_btn._is_restore = True; win._max_btn.update()
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":
