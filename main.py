@@ -27,8 +27,8 @@ from PyQt5.QtWidgets import (
     QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QSizePolicy, QFileDialog, QMenu,
     QStackedWidget, QStackedLayout, QSystemTrayIcon, QAction
 )
-from PyQt5.QtCore import Qt, QPoint, QRect, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve
-from PyQt5.QtGui import QFont, QPainter, QColor, QPixmap, QIcon, QFontMetrics, QPen, QPolygon, QIntValidator
+from PyQt5.QtCore import Qt, QPoint, QRect, QThread, QObject, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve
+from PyQt5.QtGui import QFont, QPainter, QColor, QPixmap, QIcon, QFontMetrics, QPen, QPolygon, QIntValidator, QCursor
 
 GRID_SIZE = 20
 MIN_W = 260
@@ -122,9 +122,38 @@ TYPE_WEATHER = "weather"
 TYPE_DOCK = "dock"
 TYPE_TODO = "todo"
 TYPE_CLOCK = "clock"
+TYPE_MONITOR = "monitor"
+TYPE_LAUNCHER = "launcher"
+TYPE_NOTE = "note"
+TYPE_QUICKACTION = "quickaction"
+TYPE_MEDIA = "media"
+TYPE_CLIPBOARD = "clipboard"
+TYPE_TIMER = "timer"
+TYPE_GALLERY = "gallery"
+TYPE_SYSINFO = "sysinfo"
+TYPE_BOOKMARK = "bookmark"
+TYPE_CALC = "calc"
+TYPE_TRASH = "trash"
+TYPE_RSS = "rss"
 TYPE_LABELS = {TYPE_CMD: "CMD", TYPE_CMD_WINDOW: "CMD窗口", TYPE_SHORTCUT: "快捷方式",
                TYPE_CALENDAR: "日历", TYPE_WEATHER: "天气", TYPE_DOCK: "Dock栏", TYPE_TODO: "待办",
-               TYPE_CLOCK: "时钟"}
+               TYPE_CLOCK: "时钟", TYPE_MONITOR: "系统监控", TYPE_LAUNCHER: "应用启动器",
+               TYPE_NOTE: "便签", TYPE_QUICKACTION: "快捷操作",
+               TYPE_MEDIA: "媒体控制", TYPE_CLIPBOARD: "剪贴板", TYPE_TIMER: "计时器",
+               TYPE_GALLERY: "相册", TYPE_SYSINFO: "系统信息",
+               TYPE_BOOKMARK: "书签", TYPE_CALC: "计算器", TYPE_TRASH: "回收站",
+               TYPE_RSS: "RSS"}
+
+MONITOR_SUB_CPU = "cpu"
+MONITOR_SUB_MEM = "memory"
+MONITOR_SUB_DISK = "disk"
+MONITOR_SUB_NET = "network"
+MONITOR_SUB_ALL = "all"
+MONITOR_SUB_LABELS = {
+    MONITOR_SUB_CPU: "CPU", MONITOR_SUB_MEM: "内存",
+    MONITOR_SUB_DISK: "磁盘", MONITOR_SUB_NET: "网络",
+    MONITOR_SUB_ALL: "综合概览",
+}
 
 CLOCK_SUB_CLOCK = "clock"
 CLOCK_SUB_WORLD = "world"
@@ -267,11 +296,14 @@ class DesktopBackend:
 
 
 class _X11DesktopBackend(DesktopBackend):
+    _ding_was_enabled = False
+
     @property
     def name(self):
         return "X11"
 
     def setup_window(self, window):
+        self._suppress_gnome_desktop()
         window.setWindowFlags(
             Qt.FramelessWindowHint
             | Qt.WindowStaysOnBottomHint
@@ -282,6 +314,46 @@ class _X11DesktopBackend(DesktopBackend):
         geo = self.get_full_geometry()
         window.setGeometry(geo)
         QTimer.singleShot(100, lambda: self._set_x11_hints(window))
+        self._window = window
+        self._restack_timer = QTimer()
+        self._restack_timer.timeout.connect(lambda: self._restack_window(window))
+        self._restack_timer.start(3000)
+
+    def _suppress_gnome_desktop(self):
+        try:
+            r = subprocess.run(
+                ["gnome-extensions", "info", "ding@rastersoft.com"],
+                capture_output=True, text=True, timeout=3)
+            if "ENABLED" in r.stdout.upper():
+                _X11DesktopBackend._ding_was_enabled = True
+                subprocess.run(
+                    ["gnome-extensions", "disable", "ding@rastersoft.com"],
+                    capture_output=True, timeout=3)
+                print("[Desktop] Disabled ding extension", flush=True)
+        except Exception:
+            pass
+
+    @staticmethod
+    def restore_gnome_desktop():
+        if _X11DesktopBackend._ding_was_enabled:
+            try:
+                subprocess.run(
+                    ["gnome-extensions", "enable", "ding@rastersoft.com"],
+                    capture_output=True, timeout=3)
+                print("[Desktop] Restored ding extension", flush=True)
+            except Exception:
+                pass
+
+    def _restack_window(self, window):
+        try:
+            wid = int(window.winId())
+            subprocess.run(
+                ["xprop", "-id", str(wid),
+                 "-f", "_NET_WM_WINDOW_TYPE", "32a",
+                 "-set", "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_DESKTOP"],
+                capture_output=True, timeout=2)
+        except Exception:
+            pass
 
     def _set_x11_hints(self, window):
         try:
@@ -385,6 +457,233 @@ class _FallbackDesktopBackend(DesktopBackend):
         )
         geo = self.get_full_geometry()
         window.setGeometry(geo)
+
+
+# ---------------------------------------------------------------------------
+# Autostart management
+# ---------------------------------------------------------------------------
+_AUTOSTART_DIR = os.path.expanduser("~/.config/autostart")
+_AUTOSTART_FILE = os.path.join(_AUTOSTART_DIR, "fastpanel.desktop")
+_APP_DESKTOP_DIR = os.path.expanduser("~/.local/share/applications")
+_APP_DESKTOP_FILE = os.path.join(_APP_DESKTOP_DIR, "fastpanel.desktop")
+
+def _desktop_entry_content(autostart=False):
+    main_py = os.path.abspath(__file__)
+    icon = os.path.join(os.path.dirname(main_py), "fastpanel.svg")
+    entry = f"""[Desktop Entry]
+Type=Application
+Name=FastPanel
+Comment=Desktop widget engine
+Exec=python3 {main_py} --desktop
+Icon={icon}
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+"""
+    if autostart:
+        entry += "X-GNOME-Autostart-enabled=true\n"
+    return entry
+
+def _is_autostart_enabled():
+    return os.path.isfile(_AUTOSTART_FILE)
+
+def _set_autostart(enabled: bool):
+    if enabled:
+        os.makedirs(_AUTOSTART_DIR, exist_ok=True)
+        with open(_AUTOSTART_FILE, "w") as f:
+            f.write(_desktop_entry_content(autostart=True))
+    else:
+        if os.path.isfile(_AUTOSTART_FILE):
+            os.remove(_AUTOSTART_FILE)
+
+def _install_desktop_entry():
+    os.makedirs(_APP_DESKTOP_DIR, exist_ok=True)
+    with open(_APP_DESKTOP_FILE, "w") as f:
+        f.write(_desktop_entry_content())
+
+# ---------------------------------------------------------------------------
+# Global Hotkey Manager (X11 via python-xlib, fallback: noop)
+# ---------------------------------------------------------------------------
+class _HotkeySignalBridge(QObject):
+    triggered = pyqtSignal(str)
+
+class _HotkeyManager:
+    _instance = None
+
+    def __init__(self):
+        self._bindings: dict[str, callable] = {}
+        self._running = False
+        self._bridge = _HotkeySignalBridge()
+        self._bridge.triggered.connect(self._fire)
+
+    @classmethod
+    def create(cls):
+        if cls._instance:
+            return cls._instance
+        if sys.platform == "linux":
+            try:
+                inst = _X11HotkeyManager()
+                cls._instance = inst
+                return inst
+            except Exception:
+                pass
+        inst = _HotkeyManager()
+        cls._instance = inst
+        return inst
+
+    def register(self, key_str: str, callback: callable):
+        self._bindings[key_str] = callback
+
+    def unregister(self, key_str: str):
+        self._bindings.pop(key_str, None)
+
+    def start(self):
+        pass
+
+    def stop(self):
+        self._running = False
+
+    def _fire(self, key_str):
+        cb = self._bindings.get(key_str)
+        if cb:
+            print(f"[Hotkey] Executing callback for: {key_str}", flush=True)
+            cb()
+
+
+class _X11HotkeyManager(_HotkeyManager):
+    _MOD_MAP = {
+        "ctrl": "control", "control": "control",
+        "alt": "mod1", "mod1": "mod1",
+        "shift": "shift",
+        "super": "mod4", "win": "mod4", "mod4": "mod4",
+    }
+
+    def __init__(self):
+        super().__init__()
+        from Xlib import X, display as xdisplay, XK
+        self._X = X
+        self._XK = XK
+        self._display = xdisplay.Display()
+        self._display.set_error_handler(self._x_error_handler)
+        self._root = self._display.screen().root
+        self._grabbed_keys: list[tuple] = []
+        self._thread = None
+        self._grab_failures: list[str] = []
+
+    @staticmethod
+    def _x_error_handler(err, *args):
+        pass
+
+    def _parse_hotkey(self, key_str: str):
+        from Xlib import X, XK
+        parts = [p.strip().lower() for p in key_str.split("+")]
+        mod_mask = 0
+        keycode = 0
+        mod_bits = {"control": X.ControlMask, "shift": X.ShiftMask,
+                     "mod1": X.Mod1Mask, "mod4": X.Mod4Mask}
+        for p in parts:
+            mapped = self._MOD_MAP.get(p)
+            if mapped and mapped in mod_bits:
+                mod_mask |= mod_bits[mapped]
+            else:
+                keysym = XK.string_to_keysym(p.capitalize() if len(p) == 1 else p)
+                if keysym == 0:
+                    keysym = XK.string_to_keysym(p)
+                if keysym == 0:
+                    _sym_map = {
+                        "f1": "F1", "f2": "F2", "f3": "F3", "f4": "F4",
+                        "f5": "F5", "f6": "F6", "f7": "F7", "f8": "F8",
+                        "f9": "F9", "f10": "F10", "f11": "F11", "f12": "F12",
+                        "space": "space", "return": "Return", "enter": "Return",
+                        "escape": "Escape", "esc": "Escape", "tab": "Tab",
+                        "backspace": "BackSpace", "delete": "Delete",
+                        "up": "Up", "down": "Down", "left": "Left", "right": "Right",
+                        "home": "Home", "end": "End", "pageup": "Prior", "pagedown": "Next",
+                    }
+                    mapped_name = _sym_map.get(p, p)
+                    keysym = XK.string_to_keysym(mapped_name)
+                if keysym != 0:
+                    keycode = self._display.keysym_to_keycode(keysym)
+        return keycode, mod_mask
+
+    def register(self, key_str: str, callback: callable):
+        super().register(key_str, callback)
+        keycode, mod_mask = self._parse_hotkey(key_str)
+        if keycode == 0:
+            self._grab_failures.append(key_str)
+            print(f"[Hotkey] Failed to parse: {key_str}", flush=True)
+            return
+        from Xlib import X
+        try:
+            for extra in [0, X.Mod2Mask, X.LockMask, X.Mod2Mask | X.LockMask]:
+                self._root.grab_key(keycode, mod_mask | extra, True,
+                                    X.GrabModeAsync, X.GrabModeAsync)
+            self._grabbed_keys.append((keycode, mod_mask, key_str))
+            self._display.sync()
+            print(f"[Hotkey] Registered: {key_str} (keycode={keycode}, mask={mod_mask})", flush=True)
+        except Exception as e:
+            self._grab_failures.append(key_str)
+            print(f"[Hotkey] Grab failed for {key_str}: {e}", flush=True)
+
+    def unregister(self, key_str: str):
+        super().unregister(key_str)
+        to_remove = [(kc, mm, ks) for kc, mm, ks in self._grabbed_keys if ks == key_str]
+        from Xlib import X
+        for kc, mm, _ks in to_remove:
+            for extra in [0, X.Mod2Mask, X.LockMask, X.Mod2Mask | X.LockMask]:
+                try:
+                    self._root.ungrab_key(kc, mm | extra)
+                except Exception:
+                    pass
+        self._grabbed_keys = [(kc, mm, ks) for kc, mm, ks in self._grabbed_keys if ks != key_str]
+        self._display.flush()
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._event_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        from Xlib import X
+        for kc, mm, _ks in self._grabbed_keys:
+            for extra in [0, X.Mod2Mask, X.LockMask, X.Mod2Mask | X.LockMask]:
+                try:
+                    self._root.ungrab_key(kc, mm | extra)
+                except Exception:
+                    pass
+        self._grabbed_keys.clear()
+        self._display.flush()
+
+    def _event_loop(self):
+        from Xlib import X
+        self._root.change_attributes(event_mask=X.KeyPressMask)
+        while self._running:
+            try:
+                count = self._display.pending_events()
+                if count == 0:
+                    import time
+                    time.sleep(0.05)
+                    continue
+                ev = self._display.next_event()
+                if ev.type == X.KeyPress:
+                    clean_mask = ev.state & ~(X.Mod2Mask | X.LockMask)
+                    matched = False
+                    for kc, mm, ks in self._grabbed_keys:
+                        if ev.detail == kc and clean_mask == mm:
+                            print(f"[Hotkey] Fired: {ks}", flush=True)
+                            self._bridge.triggered.emit(ks)
+                            matched = True
+                            break
+                    if not matched:
+                        print(f"[Hotkey] Unmatched key event: detail={ev.detail} state={ev.state} clean={clean_mask}", flush=True)
+            except Exception:
+                if not self._running:
+                    break
+                import time
+                time.sleep(0.1)
 
 
 _HOLIDAY_CACHE = {}
@@ -536,12 +835,53 @@ def _dialog_style():
     """
 
 
+def _scrollbar_style(width=6):
+    return f"""
+        QScrollBar:vertical {{
+            width: {width}px; background: transparent; border: none; margin: 0;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {C['surface1']}; border-radius: {width // 2}px; min-height: 20px;
+        }}
+        QScrollBar::handle:vertical:hover {{ background: {C['surface2']}; }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+        QScrollBar:horizontal {{
+            height: {width}px; background: transparent; border: none; margin: 0;
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {C['surface1']}; border-radius: {width // 2}px; min-width: 20px;
+        }}
+        QScrollBar::handle:horizontal:hover {{ background: {C['surface2']}; }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: transparent; }}
+    """
+
+
+def _hex_to_rgba(hex_color, alpha):
+    h = hex_color.lstrip('#')
+    return f"rgba({int(h[:2],16)},{int(h[2:4],16)},{int(h[4:6],16)},{alpha})"
+
+def _bg(color_key):
+    """Get a background color with component opacity applied."""
+    opa = _settings.get("comp_opacity", 90) / 100.0
+    a = int(opa * 255)
+    return _hex_to_rgba(C[color_key], a)
+
 def _comp_style():
+    opa = _settings.get("comp_opacity", 90) / 100.0
+    a = int(opa * 255)
+    bg = _hex_to_rgba(C['base'], a)
+    crust_bg = _hex_to_rgba(C['crust'], a)
+    s0_bg = _hex_to_rgba(C['surface0'], a)
+    s1_bg = _hex_to_rgba(C['surface1'], a)
+    border = _hex_to_rgba(C['surface0'], min(a + 30, 255))
+    hover = _hex_to_rgba(C['surface2'], min(a + 50, 255))
     return f"""
     QFrame[compWidget="true"] {{
-        background: {C['base']}; border: 1px solid {C['surface0']}; border-radius: 12px;
+        background: {bg}; border: 1px solid {border}; border-radius: 12px;
     }}
-    QFrame[compWidget="true"]:hover {{ border: 1px solid {C['surface2']}; }}
+    QFrame[compWidget="true"]:hover {{ border: 1px solid {hover}; }}
     #badge {{
         background: {C['blue']}; color: {C['crust']};
         border-radius: 4px; font-size: 10px; font-weight: bold; padding: 0 8px;
@@ -564,7 +904,7 @@ def _comp_style():
     #runBtn[running="true"] {{ background: {C['red']}; }}
     #runBtn[running="true"]:hover {{ background: {C['peach']}; }}
     #cmdFrame {{
-        background: {C['crust']}; border-radius: 8px;
+        background: {crust_bg}; border-radius: 8px;
     }}
     #prompt {{
         color: {C['green']};
@@ -577,22 +917,22 @@ def _comp_style():
         font-size: 12px;
     }}
     #paramInput {{
-        background: {C['crust']}; color: {C['yellow']};
-        border: 1px solid {C['surface0']}; border-radius: 6px;
+        background: {crust_bg}; color: {C['yellow']};
+        border: 1px solid {border}; border-radius: 6px;
         padding: 5px 10px;
         font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
         font-size: 12px;
     }}
     #paramInput:focus {{ border: 1px solid {C['yellow']}; }}
     #output {{
-        background: {C['crust']}; color: {C['green']};
-        border: 1px solid {C['surface0']}; border-radius: 8px;
+        background: {crust_bg}; color: {C['green']};
+        border: 1px solid {border}; border-radius: 8px;
         font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
         font-size: 11px; padding: 8px;
     }}
     #stdinInput {{
-        background: {C['crust']}; color: {C['text']};
-        border: 1px solid {C['surface0']}; border-radius: 6px;
+        background: {crust_bg}; color: {C['text']};
+        border: 1px solid {border}; border-radius: 6px;
         padding: 4px 8px;
         font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
         font-size: 11px;
@@ -605,7 +945,7 @@ def _comp_style():
         font-weight: bold; padding: 4px;
     }}
     #sendBtn:hover {{ background: {C['teal']}; }}
-    #sendBtn:disabled {{ background: {C['surface1']}; color: {C['overlay0']}; }}
+    #sendBtn:disabled {{ background: {s1_bg}; color: {C['overlay0']}; }}
     #launchBtn {{
         background: {C['peach']}; color: {C['crust']};
         border: none; border-radius: 8px; padding: 10px 24px;
@@ -855,6 +1195,7 @@ class DragResizeMixin:
         if e.pos().y() < 44:
             self._dragging = True
             self._drag_offset = e.globalPos() - self.pos()
+            self._drag_origin = QPoint(self.x(), self.y())
             return True
         return False
 
@@ -946,6 +1287,38 @@ class CompBase(QFrame, DragResizeMixin):
             self.setMinimumSize(GRID_SIZE * 10, GRID_SIZE * 8)
         elif data.comp_type == TYPE_CLOCK:
             self.setMinimumSize(GRID_SIZE * 8, GRID_SIZE * 6)
+        elif data.comp_type == TYPE_MONITOR:
+            sub = data.cmd.strip() if data.cmd else MONITOR_SUB_ALL
+            if sub == MONITOR_SUB_ALL:
+                self.setMinimumSize(GRID_SIZE * 20, GRID_SIZE * 16)
+            elif sub == MONITOR_SUB_DISK:
+                self.setMinimumSize(GRID_SIZE * 16, GRID_SIZE * 8)
+            else:
+                self.setMinimumSize(GRID_SIZE * 12, GRID_SIZE * 8)
+        elif data.comp_type == TYPE_LAUNCHER:
+            self.setMinimumSize(GRID_SIZE * 14, GRID_SIZE * 16)
+        elif data.comp_type == TYPE_NOTE:
+            self.setMinimumSize(GRID_SIZE * 10, GRID_SIZE * 8)
+        elif data.comp_type == TYPE_QUICKACTION:
+            self.setMinimumSize(GRID_SIZE * 16, GRID_SIZE * 10)
+        elif data.comp_type == TYPE_MEDIA:
+            self.setMinimumSize(GRID_SIZE * 14, GRID_SIZE * 6)
+        elif data.comp_type == TYPE_CLIPBOARD:
+            self.setMinimumSize(GRID_SIZE * 12, GRID_SIZE * 10)
+        elif data.comp_type == TYPE_TIMER:
+            self.setMinimumSize(GRID_SIZE * 10, GRID_SIZE * 8)
+        elif data.comp_type == TYPE_GALLERY:
+            self.setMinimumSize(GRID_SIZE * 12, GRID_SIZE * 10)
+        elif data.comp_type == TYPE_SYSINFO:
+            self.setMinimumSize(GRID_SIZE * 14, GRID_SIZE * 10)
+        elif data.comp_type == TYPE_BOOKMARK:
+            self.setMinimumSize(GRID_SIZE * 12, GRID_SIZE * 10)
+        elif data.comp_type == TYPE_CALC:
+            self.setMinimumSize(GRID_SIZE * 12, GRID_SIZE * 14)
+        elif data.comp_type == TYPE_TRASH:
+            self.setMinimumSize(GRID_SIZE * 10, GRID_SIZE * 6)
+        elif data.comp_type == TYPE_RSS:
+            self.setMinimumSize(GRID_SIZE * 14, GRID_SIZE * 14)
         elif data.comp_type == TYPE_CMD and not data.show_output:
             np = count_params(data.cmd)
             mh = GRID_SIZE * (2 + np * 2) if np > 0 else GRID_SIZE * 2
@@ -956,9 +1329,33 @@ class CompBase(QFrame, DragResizeMixin):
         self.setStyleSheet(_comp_style())
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._ctx_menu)
+        self._apply_opacity_effect()
+
+    def _apply_opacity_effect(self):
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(24); shadow.setOffset(0,4); shadow.setColor(QColor(0,0,0,100))
+        shadow.setBlurRadius(24); shadow.setOffset(0, 4); shadow.setColor(QColor(0, 0, 0, 100))
         self.setGraphicsEffect(shadow)
+
+    def refresh_theme(self):
+        for timer in self.findChildren(QTimer):
+            timer.stop()
+        old_layout = self.layout()
+        if old_layout:
+            self._clear_layout_recursive(old_layout)
+            QWidget().setLayout(old_layout)
+        build_fn = getattr(self, '_build_ui', None) or getattr(self, '_build', None)
+        if build_fn:
+            build_fn()
+
+    @staticmethod
+    def _clear_layout_recursive(layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+            elif item.layout():
+                CompBase._clear_layout_recursive(item.layout())
 
     def _get_grid(self):
         p = self.parent()
@@ -981,8 +1378,8 @@ class CompBase(QFrame, DragResizeMixin):
         menu.setStyleSheet(f"""
             QMenu {{ background:{C['base']}; border:1px solid {C['surface0']}; border-radius:8px; padding:6px 0; }}
             QMenu::item {{ color:{C['text']}; padding:8px 28px 8px 16px; font-size:12px; }}
-            QMenu::item:selected {{ background:{C['surface1']}; }}
-            QMenu::separator {{ height:1px; background:{C['surface0']}; margin:4px 8px; }}
+            QMenu::item:selected {{ background:{_bg('surface1')}; }}
+            QMenu::separator {{ height:1px; background:{_bg('surface0')}; margin:4px 8px; }}
         """)
 
         grid = self._get_grid()
@@ -1031,14 +1428,20 @@ class CompBase(QFrame, DragResizeMixin):
     def mouseMoveEvent(self, e):
         if getattr(self, '_batch_dragging', False):
             delta = e.globalPos() - self._batch_drag_origin
-            pw = self.parent().width() if self.parent() else 9999
+            par = self.parent()
+            pw = par.width() if par else 9999
+            ph = par.height() if par else 9999
+            safe_top = getattr(par, '_safe_margin_top', 0) if par else 0
+            safe_bottom = getattr(par, '_safe_margin_bottom', 0) if par else 0
             min_x = min(orig.x() for _, orig in self._batch_offsets)
             min_y = min(orig.y() for _, orig in self._batch_offsets)
             max_r = max(orig.x() + w.width() for w, orig in self._batch_offsets)
+            max_b = max(orig.y() + w.height() for w, orig in self._batch_offsets)
             dx, dy = delta.x(), delta.y()
             if min_x + dx < 0: dx = -min_x
-            if min_y + dy < 0: dy = -min_y
+            if min_y + dy < safe_top: dy = safe_top - min_y
             if max_r + dx > pw: dx = pw - max_r
+            if max_b + dy > ph - safe_bottom: dy = ph - safe_bottom - max_b
             for w, orig in self._batch_offsets:
                 w.move(orig.x() + dx, orig.y() + dy)
             grid = self._get_grid()
@@ -1050,13 +1453,29 @@ class CompBase(QFrame, DragResizeMixin):
     def mouseReleaseEvent(self, e):
         if getattr(self, '_batch_dragging', False):
             self._batch_dragging = False
+            par = self.parent()
+            pw = par.width() if par else 9999
+            ph = par.height() if par else 9999
+            safe_top = getattr(par, '_safe_margin_top', 0) if par else 0
+            safe_bottom = getattr(par, '_safe_margin_bottom', 0) if par else 0
+            grid = self._get_grid()
+            all_snapshot = [(w, w.data.x, w.data.y) for w in grid._components] if grid else []
+            batch_origins = list(self._batch_offsets)
             for w, _ in self._batch_offsets:
                 x, y = snap(w.x()), snap(w.y())
+                x = max(0, min(x, pw - w.width()))
+                y = max(safe_top, min(y, ph - safe_bottom - w.height()))
                 w.move(x, y); w.data.x, w.data.y = x, y
-            self.geometry_changed.emit()
-            grid = self._get_grid()
             if grid:
+                for w, _ in self._batch_offsets:
+                    grid._resolve_overlaps(w)
+                if grid._layout_overflow():
+                    for w, ox, oy in all_snapshot:
+                        w.move(ox, oy)
+                        w.data.x, w.data.y = ox, oy
+                    grid._show_toast("⚠ 布局空间不足，组件已回到原位")
                 grid._update_overlay()
+            self.geometry_changed.emit()
             return
         if self.handle_release(e, self.data): self.geometry_changed.emit()
 
@@ -1197,7 +1616,7 @@ class CmdWidget(CompBase):
         self._title.setMinimumWidth(0)
         h.addWidget(self._title)
         cmd_q = QLabel("?"); cmd_q.setFixedSize(18, 18); cmd_q.setAlignment(Qt.AlignCenter)
-        cmd_q.setStyleSheet(f"background:{C['surface1']}; color:{C['subtext0']}; border-radius:9px; font-size:11px; font-weight:bold;")
+        cmd_q.setStyleSheet(f"background:{_bg('surface1')}; color:{C['subtext0']}; border-radius:9px; font-size:11px; font-weight:bold;")
         cmd_q.setToolTip(self.data.cmd)
         h.addWidget(cmd_q)
         if self.data.show_output:
@@ -1219,7 +1638,7 @@ class CmdWidget(CompBase):
             row.addWidget(inp); self._param_inputs.append(inp)
             if hint:
                 q = QLabel("?"); q.setFixedSize(18, 18); q.setAlignment(Qt.AlignCenter)
-                q.setStyleSheet(f"background:{C['surface1']}; color:{C['subtext0']}; border-radius:9px; font-size:11px; font-weight:bold;")
+                q.setStyleSheet(f"background:{_bg('surface1')}; color:{C['subtext0']}; border-radius:9px; font-size:11px; font-weight:bold;")
                 q.setToolTip(hint)
                 row.addWidget(q)
             root.addLayout(row)
@@ -1321,13 +1740,13 @@ class CmdWidget(CompBase):
         else:
             if code == -15:
                 self._run_btn.setText("⏹ 已停止")
-                self._run_btn.setStyleSheet(f"background:{C['surface1']}; color:{C['text']}; border:none; border-radius:6px; padding:0 14px; font-weight:bold; font-size:12px;")
+                self._run_btn.setStyleSheet(f"background:{_bg('surface1')}; color:{C['text']}; border:none; border-radius:6px; padding:0 14px; font-weight:bold; font-size:12px;")
             elif code == 0:
                 self._run_btn.setText("✓ 完成")
-                self._run_btn.setStyleSheet(f"background:{C['surface0']}; color:{C['green']}; border:none; border-radius:6px; padding:0 14px; font-weight:bold; font-size:12px;")
+                self._run_btn.setStyleSheet(f"background:{_bg('surface0')}; color:{C['green']}; border:none; border-radius:6px; padding:0 14px; font-weight:bold; font-size:12px;")
             else:
                 self._run_btn.setText(f"✗ 失败({code})")
-                self._run_btn.setStyleSheet(f"background:{C['surface0']}; color:{C['red']}; border:none; border-radius:6px; padding:0 14px; font-weight:bold; font-size:12px;")
+                self._run_btn.setStyleSheet(f"background:{_bg('surface0')}; color:{C['red']}; border:none; border-radius:6px; padding:0 14px; font-weight:bold; font-size:12px;")
             QTimer.singleShot(2000, self._reset_btn)
 
     def _reset_btn(self):
@@ -1367,7 +1786,7 @@ class CmdWindowWidget(CompBase):
         self._title = QLabel(self.data.name); self._title.setObjectName("title")
         self._title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred); h.addWidget(self._title)
         exp_btn = QPushButton("📋"); exp_btn.setFixedSize(28, 28); exp_btn.setCursor(Qt.PointingHandCursor)
-        exp_btn.setToolTip("导出日志"); exp_btn.setStyleSheet(f"background:{C['surface1']}; color:{C['text']}; border:none; border-radius:6px; font-size:14px;")
+        exp_btn.setToolTip("导出日志"); exp_btn.setStyleSheet(f"background:{_bg('surface1')}; color:{C['text']}; border:none; border-radius:6px; font-size:14px;")
         exp_btn.clicked.connect(self._export_log); h.addWidget(exp_btn)
         fs = _ExpandBtn()
         fs.clicked.connect(self._open_fullscreen); h.addWidget(fs)
@@ -1752,13 +2171,13 @@ class CalendarWidget(CompBase):
 
         nav = QHBoxLayout(); nav.setSpacing(4)
         pb = QPushButton("◀"); pb.setFixedSize(28, 28); pb.setCursor(Qt.PointingHandCursor)
-        pb.setStyleSheet(f"background:{C['surface1']}; color:{C['text']}; border:none; border-radius:6px; font-size:12px;")
+        pb.setStyleSheet(f"background:{_bg('surface1')}; color:{C['text']}; border:none; border-radius:6px; font-size:12px;")
         pb.clicked.connect(self._prev_month); nav.addWidget(pb)
         self._month_lbl = QLabel(); self._month_lbl.setAlignment(Qt.AlignCenter)
         self._month_lbl.setStyleSheet(f"color:{C['text']}; font-size:14px; font-weight:bold;")
         nav.addWidget(self._month_lbl, 1)
         nb = QPushButton("▶"); nb.setFixedSize(28, 28); nb.setCursor(Qt.PointingHandCursor)
-        nb.setStyleSheet(f"background:{C['surface1']}; color:{C['text']}; border:none; border-radius:6px; font-size:12px;")
+        nb.setStyleSheet(f"background:{_bg('surface1')}; color:{C['text']}; border:none; border-radius:6px; font-size:12px;")
         nb.clicked.connect(self._next_month); nav.addWidget(nb)
         tb = QPushButton("今天"); tb.setFixedHeight(28); tb.setCursor(Qt.PointingHandCursor)
         tb.setStyleSheet(f"background:{C['blue']}; color:{C['crust']}; border:none; border-radius:6px; font-size:11px; font-weight:bold; padding:0 10px;")
@@ -1870,7 +2289,7 @@ class CalendarWidget(CompBase):
                     dl.setStyleSheet(f"color:{C['crust']}; font-size:13px; font-weight:bold;")
                     ll.setStyleSheet(f"color:{C['crust']}; font-size:8px;")
                 elif is_selected:
-                    w.setStyleSheet(f"background:{C['surface1']}; border-radius:6px; border:2px solid {C['blue']};")
+                    w.setStyleSheet(f"background:{_bg('surface1')}; border-radius:6px; border:2px solid {C['blue']};")
                     dl.setStyleSheet(f"color:{C['text']}; font-size:13px; font-weight:bold;")
                     if holiday_name:
                         ll.setStyleSheet(f"color:{C['green']}; font-size:8px; font-weight:bold;")
@@ -2146,6 +2565,19 @@ class _TempChartWidget(QWidget):
 
         p.end()
 
+    def refresh_theme(self):
+        saved_year = self._year
+        saved_month = self._month
+        saved_selected = self._selected
+        super().refresh_theme()
+        self._year = saved_year
+        self._month = saved_month
+        self._selected = saved_selected
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._auto_refresh)
+        self._refresh_timer.start(max(self.data.refresh_interval, 10) * 1000)
+        self._refresh()
+
 
 class WeatherWidget(CompBase):
     def __init__(self, data, parent=None):
@@ -2320,6 +2752,13 @@ class WeatherWidget(CompBase):
         _, name = self._parse_city_cmd()
         self._city_lbl.setText(name)
         self._has_data = False
+        self._fetch_weather()
+
+    def refresh_theme(self):
+        super().refresh_theme()
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._fetch_weather)
+        self._refresh_timer.start(max(self.data.refresh_interval, 10) * 1000)
         self._fetch_weather()
 
 
@@ -2616,10 +3055,10 @@ class DockWidget(CompBase):
         add_btn.setCursor(Qt.PointingHandCursor)
         add_btn.setStyleSheet(f"""
             QPushButton {{
-                background: {C['surface0']}; color: {C['overlay0']}; border: 2px dashed {C['surface2']};
+                background: {_bg('surface0')}; color: {C['overlay0']}; border: 2px dashed {C['surface2']};
                 border-radius: 12px; font-size: 22px; font-weight: bold;
             }}
-            QPushButton:hover {{ background: {C['surface1']}; color: {C['text']}; border-color: {C['overlay0']}; }}
+            QPushButton:hover {{ background: {_bg('surface1')}; color: {C['text']}; border-color: {C['overlay0']}; }}
         """)
         add_btn.setToolTip("添加项目")
         add_btn.clicked.connect(self._add_item)
@@ -2675,9 +3114,9 @@ class DockWidget(CompBase):
         from PyQt5.QtWidgets import QMenu
         menu = QMenu(self)
         menu.setStyleSheet(f"""
-            QMenu {{ background: {C['surface0']}; color: {C['text']}; border: 1px solid {C['surface2']}; border-radius: 6px; padding: 4px; }}
+            QMenu {{ background: {_bg('surface0')}; color: {C['text']}; border: 1px solid {C['surface2']}; border-radius: 6px; padding: 4px; }}
             QMenu::item {{ padding: 6px 20px; border-radius: 4px; }}
-            QMenu::item:selected {{ background: {C['surface1']}; }}
+            QMenu::item:selected {{ background: {_bg('surface1')}; }}
         """)
         add_act = menu.addAction("➕ 添加项目")
         menu.addSeparator()
@@ -2884,7 +3323,7 @@ class TodoWidget(CompBase):
         add_row = QHBoxLayout(); add_row.setSpacing(4)
         self._add_edit = QLineEdit()
         self._add_edit.setPlaceholderText("添加新待办…")
-        self._add_edit.setStyleSheet(f"background:{C['surface0']}; color:{C['text']}; border:1px solid {C['surface2']}; border-radius:6px; padding:4px 8px; font-size:12px;")
+        self._add_edit.setStyleSheet(f"background:{_bg('surface0')}; color:{C['text']}; border:1px solid {C['surface2']}; border-radius:6px; padding:4px 8px; font-size:12px;")
         self._add_edit.returnPressed.connect(self._add_todo)
         add_row.addWidget(self._add_edit, 1)
         add_btn = QPushButton("+")
@@ -2936,7 +3375,7 @@ class TodoWidget(CompBase):
 
     def _make_row(self, t):
         row = QWidget()
-        row.setStyleSheet(f"background:{C['surface0']}; border-radius:6px;")
+        row.setStyleSheet(f"background:{_bg('surface0')}; border-radius:6px;")
         rl = QHBoxLayout(row); rl.setContentsMargins(8, 6, 8, 6); rl.setSpacing(8)
 
         chk = QCheckBox()
@@ -2981,7 +3420,7 @@ class TodoWidget(CompBase):
         edit_btn.setFixedHeight(24)
         edit_btn.setCursor(Qt.PointingHandCursor)
         edit_btn.setStyleSheet(f"""
-            QPushButton {{ background:{C['surface1']}; color:{C['subtext0']}; border:none; border-radius:4px; font-size:10px; padding:2px 8px; }}
+            QPushButton {{ background:{_bg('surface1')}; color:{C['subtext0']}; border:none; border-radius:4px; font-size:10px; padding:2px 8px; }}
             QPushButton:hover {{ background:{C['surface2']}; color:{C['text']}; }}
         """)
         edit_btn.clicked.connect(lambda _, tid=t["id"]: self._edit_todo(tid))
@@ -3367,6 +3806,13 @@ class ClockWidget(CompBase):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(100 if self._clock_sub == CLOCK_SUB_STOPWATCH else 1000)
+
+    def refresh_theme(self):
+        super().refresh_theme()
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(100 if self._clock_sub == CLOCK_SUB_STOPWATCH else 1000)
+        self._tick()
 
     def _parse_clock_cmd(self):
         raw = self.data.cmd.strip()
@@ -3813,7 +4259,7 @@ class ClockWidget(CompBase):
             lap_str = f"{lap_ms // 60000:02d}:{(lap_ms % 60000) // 1000:02d}.{lap_ms % 1000:03d}"
             total_str = f"{elapsed // 60000:02d}:{(elapsed % 60000) // 1000:02d}.{elapsed % 1000:03d}"
             row_w = QWidget()
-            row_w.setStyleSheet(f"background:{C['surface0']}; border-radius:6px;")
+            row_w.setStyleSheet(f"background:{_bg('surface0')}; border-radius:6px;")
             rl = QHBoxLayout(row_w); rl.setContentsMargins(10, 4, 10, 4); rl.setSpacing(0)
             idx_lbl = QLabel(f"#{idx}")
             idx_lbl.setStyleSheet(f"color:{C['blue']}; font-size:11px; font-weight:bold; font-family:'JetBrains Mono','Consolas',monospace; background:transparent;")
@@ -3971,8 +4417,8 @@ class ClockWidget(CompBase):
             row.setCursor(Qt.PointingHandCursor)
             en = a.get("enabled", True)
             row.setStyleSheet(f"""
-                QPushButton {{ background:{C['surface0']}; border-radius:8px; border:none; text-align:left; padding:0; }}
-                QPushButton:hover {{ background:{C['surface1']}; }}""")
+                QPushButton {{ background:{_bg('surface0')}; border-radius:8px; border:none; text-align:left; padding:0; }}
+                QPushButton:hover {{ background:{_bg('surface1')}; }}""")
             idx = i
             row.clicked.connect(lambda _, ii=idx: self._alarm_edit(ii))
             rl = QHBoxLayout(row)
@@ -4060,26 +4506,26 @@ class ClockWidget(CompBase):
             QDialog {{ background: {C['base']}; color: {C['text']}; border-radius: 12px; }}
             QLabel {{ color: {C['text']}; background: transparent; }}
             QLabel#dialogTitle {{ color: {C['text']}; font-size: 16px; font-weight: bold; }}
-            QLineEdit {{ background: {C['surface0']}; color: {C['text']}; border: 1px solid {C['surface2']};
+            QLineEdit {{ background: {_bg('surface0')}; color: {C['text']}; border: 1px solid {C['surface2']};
                 border-radius: 8px; padding: 8px 12px; font-size: 13px; }}
             QLineEdit:focus {{ border: 1px solid {C['blue']}; }}
-            QComboBox {{ background: {C['surface0']}; color: {C['text']}; border: 1px solid {C['surface2']};
+            QComboBox {{ background: {_bg('surface0')}; color: {C['text']}; border: 1px solid {C['surface2']};
                 border-radius: 8px; padding: 8px 12px; font-size: 13px; }}
             QComboBox:focus {{ border: 1px solid {C['blue']}; }}
             QComboBox::drop-down {{ border: none; padding-right: 8px; }}
-            QComboBox QAbstractItemView {{ background: {C['surface0']}; color: {C['text']};
+            QComboBox QAbstractItemView {{ background: {_bg('surface0')}; color: {C['text']};
                 selection-background-color: {C['surface2']}; border: 1px solid {C['surface2']}; border-radius: 6px; }}
-            QDateEdit, QTimeEdit {{ background: {C['surface0']}; color: {C['text']}; border: 1px solid {C['surface2']};
+            QDateEdit, QTimeEdit {{ background: {_bg('surface0')}; color: {C['text']}; border: 1px solid {C['surface2']};
                 border-radius: 8px; padding: 8px 12px; font-size: 15px; font-weight: bold;
                 font-family: 'JetBrains Mono','Consolas',monospace; }}
             QDateEdit:focus, QTimeEdit:focus {{ border: 1px solid {C['blue']}; }}
             QDateEdit::up-button, QDateEdit::down-button, QTimeEdit::up-button, QTimeEdit::down-button {{
                 width: 20px; border: none; background: transparent; }}
-            QCalendarWidget {{ background: {C['surface0']}; color: {C['text']}; }}
+            QCalendarWidget {{ background: {_bg('surface0')}; color: {C['text']}; }}
             QPushButton#okBtn {{ background: {C['blue']}; color: {C['crust']}; border: none;
                 border-radius: 8px; padding: 10px 24px; font-size: 13px; font-weight: bold; }}
             QPushButton#okBtn:hover {{ background: {C['sky']}; }}
-            QPushButton#cancelBtn {{ background: {C['surface1']}; color: {C['text']}; border: none;
+            QPushButton#cancelBtn {{ background: {_bg('surface1')}; color: {C['text']}; border: none;
                 border-radius: 8px; padding: 10px 24px; font-size: 13px; }}
             QPushButton#cancelBtn:hover {{ background: {C['surface2']}; }}
         """)
@@ -4246,6 +4692,2254 @@ class ClockWidget(CompBase):
         self._alarm_alert_overlay = overlay
 
 
+class MonitorWidget(CompBase):
+    def __init__(self, data, parent=None):
+        super().__init__(data, parent)
+        self._parse_monitor_cmd()
+        self._history_len = 60
+        self._cpu_history = [0.0] * self._history_len
+        self._net_sent_history = [0.0] * self._history_len
+        self._net_recv_history = [0.0] * self._history_len
+        self._mem_history = [0.0] * self._history_len
+        self._prev_net = None
+        self._build()
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(1500)
+        self._tick()
+
+    def refresh_theme(self):
+        cpu_h = list(self._cpu_history)
+        mem_h = list(self._mem_history)
+        net_s = list(self._net_sent_history)
+        net_r = list(self._net_recv_history)
+        prev = self._prev_net
+        super().refresh_theme()
+        self._cpu_history = cpu_h
+        self._mem_history = mem_h
+        self._net_sent_history = net_s
+        self._net_recv_history = net_r
+        self._prev_net = prev
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(1500)
+
+    def _parse_monitor_cmd(self):
+        raw = self.data.cmd.strip()
+        self._monitor_sub = raw if raw in MONITOR_SUB_LABELS else MONITOR_SUB_ALL
+
+    def _build(self):
+        self._canvas = QWidget(self)
+        self._canvas.setAttribute(Qt.WA_TransparentForMouseEvents)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self._canvas)
+
+    _shared_cpu_val = 0.0
+    _shared_cpu_ts = 0.0
+
+    @classmethod
+    def _get_shared_cpu(cls):
+        import time, psutil
+        now = time.monotonic()
+        if now - cls._shared_cpu_ts > 0.5:
+            cls._shared_cpu_val = psutil.cpu_percent(interval=0)
+            cls._shared_cpu_ts = now
+        return cls._shared_cpu_val
+
+    def _tick(self):
+        try:
+            import psutil
+            self._cpu_history.append(self._get_shared_cpu())
+            self._cpu_history = self._cpu_history[-self._history_len:]
+            mem = psutil.virtual_memory()
+            self._mem_percent = mem.percent
+            self._mem_used = mem.used
+            self._mem_total = mem.total
+            self._mem_history.append(mem.percent)
+            self._mem_history = self._mem_history[-self._history_len:]
+            parts = psutil.disk_partitions()
+            self._disks = []
+            seen = set()
+            for p in parts:
+                if p.mountpoint in seen:
+                    continue
+                seen.add(p.mountpoint)
+                try:
+                    u = psutil.disk_usage(p.mountpoint)
+                    self._disks.append((p.mountpoint, u.used, u.total, u.percent))
+                except Exception:
+                    pass
+            net = psutil.net_io_counters()
+            if self._prev_net:
+                dt = 1.5
+                sent_speed = (net.bytes_sent - self._prev_net.bytes_sent) / dt
+                recv_speed = (net.bytes_recv - self._prev_net.bytes_recv) / dt
+            else:
+                sent_speed = recv_speed = 0.0
+            self._prev_net = net
+            self._net_sent_history.append(sent_speed)
+            self._net_recv_history.append(recv_speed)
+            self._net_sent_history = self._net_sent_history[-self._history_len:]
+            self._net_recv_history = self._net_recv_history[-self._history_len:]
+            self._net_sent_speed = sent_speed
+            self._net_recv_speed = recv_speed
+        except Exception:
+            pass
+        self._canvas.update()
+
+    def _fmt_bytes(self, b):
+        for u in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if b < 1024:
+                return f"{b:.1f}{u}"
+            b /= 1024
+        return f"{b:.1f}PB"
+
+    def _fmt_speed(self, bps):
+        for u in ['B/s', 'KB/s', 'MB/s', 'GB/s']:
+            if bps < 1024:
+                return f"{bps:.1f}{u}"
+            bps /= 1024
+        return f"{bps:.1f}TB/s"
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        sub = self._monitor_sub
+        rect = self._canvas.geometry()
+        pad = 12
+        area = QRect(rect.x() + pad, rect.y() + pad, rect.width() - pad * 2, rect.height() - pad * 2)
+        if sub == MONITOR_SUB_CPU:
+            self._paint_cpu(p, area)
+        elif sub == MONITOR_SUB_MEM:
+            self._paint_mem(p, area)
+        elif sub == MONITOR_SUB_DISK:
+            self._paint_disk(p, area)
+        elif sub == MONITOR_SUB_NET:
+            self._paint_net(p, area)
+        else:
+            self._paint_all(p, area)
+        p.end()
+
+    def _draw_line_chart(self, p, rect, data, color, max_val=100.0, label="", cur_text=""):
+        bg = QColor(C['surface0'])
+        bg.setAlpha(60)
+        p.setBrush(bg)
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(rect, 8, 8)
+
+        if label:
+            p.setPen(QColor(C['subtext0']))
+            p.setFont(QFont("JetBrains Mono", 9))
+            p.drawText(rect.adjusted(8, 4, 0, 0), Qt.AlignLeft | Qt.AlignTop, label)
+        if cur_text:
+            p.setPen(QColor(C['text']))
+            p.setFont(QFont("JetBrains Mono", 10, QFont.Bold))
+            p.drawText(rect.adjusted(0, 4, -8, 0), Qt.AlignRight | Qt.AlignTop, cur_text)
+
+        chart_rect = QRect(rect.x() + 8, rect.y() + 24, rect.width() - 16, rect.height() - 32)
+        if chart_rect.height() < 10 or chart_rect.width() < 10:
+            return
+
+        line_color = QColor(color)
+        fill_color = QColor(color)
+        fill_color.setAlpha(40)
+
+        n = len(data)
+        if n < 2 or max_val <= 0:
+            return
+        dx = chart_rect.width() / (n - 1) if n > 1 else 0
+
+        points = []
+        for i, v in enumerate(data):
+            x = chart_rect.x() + i * dx
+            ratio = min(v / max_val, 1.0)
+            y = chart_rect.bottom() - ratio * chart_rect.height()
+            points.append(QPoint(int(x), int(y)))
+
+        from PyQt5.QtGui import QPolygonF, QPainterPath, QLinearGradient
+        from PyQt5.QtCore import QPointF
+        path = QPainterPath()
+        path.moveTo(QPointF(points[0].x(), chart_rect.bottom()))
+        for pt in points:
+            path.lineTo(QPointF(pt.x(), pt.y()))
+        path.lineTo(QPointF(points[-1].x(), chart_rect.bottom()))
+        path.closeSubpath()
+
+        grad = QLinearGradient(0, chart_rect.top(), 0, chart_rect.bottom())
+        grad.setColorAt(0, fill_color)
+        fc2 = QColor(color)
+        fc2.setAlpha(5)
+        grad.setColorAt(1, fc2)
+        p.setBrush(grad)
+        p.setPen(Qt.NoPen)
+        p.drawPath(path)
+
+        pen = QPen(line_color, 2)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        for i in range(len(points) - 1):
+            p.drawLine(points[i], points[i + 1])
+
+    def _paint_cpu(self, p, area):
+        cur = self._cpu_history[-1] if self._cpu_history else 0
+        self._draw_line_chart(p, area, self._cpu_history, C['green'],
+                              max_val=100.0, label="CPU", cur_text=f"{cur:.0f}%")
+
+    def _draw_ring(self, p, rect, percent, color, label="", detail=""):
+        cx = rect.center().x()
+        cy = rect.y() + min(rect.width(), rect.height() - 30) // 2 + 4
+        radius = min(rect.width(), rect.height() - 30) // 2 - 8
+        if radius < 15:
+            return
+
+        ring_w = max(8, radius // 4)
+        ring_rect = QRect(cx - radius, cy - radius, radius * 2, radius * 2)
+
+        track_color = QColor(C['surface1'])
+        p.setPen(QPen(track_color, ring_w, Qt.SolidLine, Qt.RoundCap))
+        p.setBrush(Qt.NoBrush)
+        p.drawArc(ring_rect, 0, 360 * 16)
+
+        arc_color = QColor(color)
+        p.setPen(QPen(arc_color, ring_w, Qt.SolidLine, Qt.RoundCap))
+        span = int(-percent / 100.0 * 360 * 16)
+        p.drawArc(ring_rect, 90 * 16, span)
+
+        p.setPen(QColor(C['text']))
+        p.setFont(QFont("JetBrains Mono", max(10, radius // 3), QFont.Bold))
+        p.drawText(ring_rect, Qt.AlignCenter, f"{percent:.0f}%")
+
+        if detail:
+            p.setPen(QColor(C['subtext0']))
+            p.setFont(QFont("JetBrains Mono", 8))
+            text_y = cy + radius + ring_w // 2 + 4
+            p.drawText(QRect(rect.x(), text_y, rect.width(), 20), Qt.AlignCenter, detail)
+        if label:
+            p.setPen(QColor(C['subtext0']))
+            p.setFont(QFont("JetBrains Mono", 9))
+            p.drawText(QRect(rect.x(), rect.y(), rect.width(), 18), Qt.AlignCenter, label)
+
+    def _paint_mem(self, p, area):
+        pct = getattr(self, '_mem_percent', 0)
+        used = getattr(self, '_mem_used', 0)
+        total = getattr(self, '_mem_total', 1)
+        detail = f"{self._fmt_bytes(used)} / {self._fmt_bytes(total)}"
+        self._draw_ring(p, area, pct, C['blue'], label="内存", detail=detail)
+
+    def _paint_disk(self, p, area):
+        disks = getattr(self, '_disks', [])
+        if not disks:
+            p.setPen(QColor(C['subtext0']))
+            p.setFont(QFont("JetBrains Mono", 10))
+            p.drawText(area, Qt.AlignCenter, "无磁盘信息")
+            return
+
+        p.setPen(QColor(C['subtext0']))
+        p.setFont(QFont("JetBrains Mono", 9))
+        p.drawText(QRect(area.x(), area.y(), area.width(), 18), Qt.AlignLeft, "磁盘")
+
+        bar_h = max(14, min(22, (area.height() - 24) // max(len(disks), 1) - 8))
+        colors = [C['teal'], C['peach'], C['blue'], C['green'], C['mauve'], C['yellow']]
+        y = area.y() + 24
+
+        for i, (mount, used, total, pct) in enumerate(disks[:6]):
+            color = colors[i % len(colors)]
+            name = mount if len(mount) <= 12 else "…" + mount[-11:]
+            detail = f"{self._fmt_bytes(used)}/{self._fmt_bytes(total)}"
+
+            p.setPen(QColor(C['text']))
+            p.setFont(QFont("JetBrains Mono", 8))
+            p.drawText(QRect(area.x(), y, area.width(), bar_h), Qt.AlignLeft | Qt.AlignVCenter, name)
+
+            bar_x = area.x() + min(100, area.width() // 3)
+            bar_w = area.width() - min(100, area.width() // 3) - 80
+            bar_rect = QRect(bar_x, y + 2, bar_w, bar_h - 4)
+
+            track = QColor(C['surface1'])
+            p.setBrush(track)
+            p.setPen(Qt.NoPen)
+            p.drawRoundedRect(bar_rect, 4, 4)
+
+            fill_w = int(bar_rect.width() * pct / 100.0)
+            if fill_w > 0:
+                fill_rect = QRect(bar_rect.x(), bar_rect.y(), fill_w, bar_rect.height())
+                p.setBrush(QColor(color))
+                p.drawRoundedRect(fill_rect, 4, 4)
+
+            p.setPen(QColor(C['subtext0']))
+            p.setFont(QFont("JetBrains Mono", 8))
+            text_rect = QRect(bar_rect.right() + 6, y, 74, bar_h)
+            p.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, f"{pct:.0f}% {detail}")
+
+            y += bar_h + 6
+            if y + bar_h > area.bottom():
+                break
+
+    def _paint_net(self, p, area):
+        max_s = max(max(self._net_sent_history, default=1), max(self._net_recv_history, default=1), 1024)
+        h_half = area.height() // 2 - 4
+        up_rect = QRect(area.x(), area.y(), area.width(), h_half)
+        dn_rect = QRect(area.x(), area.y() + h_half + 8, area.width(), h_half)
+        up_spd = self._fmt_speed(getattr(self, '_net_sent_speed', 0))
+        dn_spd = self._fmt_speed(getattr(self, '_net_recv_speed', 0))
+        self._draw_line_chart(p, up_rect, self._net_sent_history, C['peach'],
+                              max_val=max_s, label="↑ 上传", cur_text=up_spd)
+        self._draw_line_chart(p, dn_rect, self._net_recv_history, C['teal'],
+                              max_val=max_s, label="↓ 下载", cur_text=dn_spd)
+
+    def _paint_all(self, p, area):
+        w_half = area.width() // 2 - 4
+        h_half = area.height() // 2 - 4
+
+        cpu_rect = QRect(area.x(), area.y(), w_half, h_half)
+        cur_cpu = self._cpu_history[-1] if self._cpu_history else 0
+        self._draw_line_chart(p, cpu_rect, self._cpu_history, C['green'],
+                              max_val=100.0, label="CPU", cur_text=f"{cur_cpu:.0f}%")
+
+        mem_rect = QRect(area.x() + w_half + 8, area.y(), w_half, h_half)
+        pct = getattr(self, '_mem_percent', 0)
+        used = getattr(self, '_mem_used', 0)
+        total = getattr(self, '_mem_total', 1)
+        self._draw_ring(p, mem_rect, pct, C['blue'], label="内存",
+                        detail=f"{self._fmt_bytes(used)}/{self._fmt_bytes(total)}")
+
+        disk_rect = QRect(area.x(), area.y() + h_half + 8, w_half, h_half)
+        self._paint_disk_mini(p, disk_rect)
+
+        net_rect = QRect(area.x() + w_half + 8, area.y() + h_half + 8, w_half, h_half)
+        max_s = max(max(self._net_sent_history, default=1), max(self._net_recv_history, default=1), 1024)
+        net_h = net_rect.height() // 2 - 2
+        up_r = QRect(net_rect.x(), net_rect.y(), net_rect.width(), net_h)
+        dn_r = QRect(net_rect.x(), net_rect.y() + net_h + 4, net_rect.width(), net_h)
+        up_spd = self._fmt_speed(getattr(self, '_net_sent_speed', 0))
+        dn_spd = self._fmt_speed(getattr(self, '_net_recv_speed', 0))
+        self._draw_line_chart(p, up_r, self._net_sent_history, C['peach'],
+                              max_val=max_s, label="↑", cur_text=up_spd)
+        self._draw_line_chart(p, dn_r, self._net_recv_history, C['teal'],
+                              max_val=max_s, label="↓", cur_text=dn_spd)
+
+    def _paint_disk_mini(self, p, area):
+        disks = getattr(self, '_disks', [])
+        if not disks:
+            p.setPen(QColor(C['subtext0']))
+            p.setFont(QFont("JetBrains Mono", 8))
+            p.drawText(area, Qt.AlignCenter, "磁盘: N/A")
+            return
+        p.setPen(QColor(C['subtext0']))
+        p.setFont(QFont("JetBrains Mono", 8))
+        p.drawText(QRect(area.x(), area.y(), area.width(), 14), Qt.AlignLeft, "磁盘")
+        bar_h = max(10, min(16, (area.height() - 18) // max(len(disks), 1) - 4))
+        colors = [C['teal'], C['peach'], C['blue'], C['green']]
+        y = area.y() + 18
+        for i, (mount, used, total, pct) in enumerate(disks[:4]):
+            color = colors[i % len(colors)]
+            name = mount if len(mount) <= 8 else "…" + mount[-7:]
+            p.setPen(QColor(C['text']))
+            p.setFont(QFont("JetBrains Mono", 7))
+            p.drawText(QRect(area.x(), y, 60, bar_h), Qt.AlignLeft | Qt.AlignVCenter, name)
+            bx = area.x() + 64
+            bw = area.width() - 64 - 36
+            br = QRect(bx, y + 1, max(bw, 10), bar_h - 2)
+            p.setBrush(QColor(C['surface1']))
+            p.setPen(Qt.NoPen)
+            p.drawRoundedRect(br, 3, 3)
+            fw = int(br.width() * pct / 100.0)
+            if fw > 0:
+                p.setBrush(QColor(color))
+                p.drawRoundedRect(QRect(br.x(), br.y(), fw, br.height()), 3, 3)
+            p.setPen(QColor(C['subtext0']))
+            p.setFont(QFont("JetBrains Mono", 7))
+            p.drawText(QRect(br.right() + 4, y, 32, bar_h), Qt.AlignLeft | Qt.AlignVCenter, f"{pct:.0f}%")
+            y += bar_h + 3
+            if y + bar_h > area.bottom():
+                break
+
+
+class _DesktopEntry:
+    __slots__ = ('name', 'generic_name', 'exec_cmd', 'icon', 'categories', 'keywords', 'no_display', 'terminal')
+
+    def __init__(self, name='', generic_name='', exec_cmd='', icon='', categories='',
+                 keywords='', no_display=False, terminal=False):
+        self.name = name
+        self.generic_name = generic_name
+        self.exec_cmd = exec_cmd
+        self.icon = icon
+        self.categories = categories
+        self.keywords = keywords
+        self.no_display = no_display
+        self.terminal = terminal
+
+    def matches(self, query):
+        q = query.lower()
+        return (q in self.name.lower() or q in self.generic_name.lower()
+                or q in self.categories.lower() or q in self.keywords.lower()
+                or q in self.exec_cmd.lower())
+
+
+def _scan_desktop_entries():
+    dirs = []
+    for d in ['/usr/share/applications', '/usr/local/share/applications',
+              os.path.expanduser('~/.local/share/applications'), '/var/lib/flatpak/exports/share/applications',
+              os.path.expanduser('~/.local/share/flatpak/exports/share/applications')]:
+        if os.path.isdir(d):
+            dirs.append(d)
+    entries = []
+    seen_names = set()
+    cfg = configparser.ConfigParser(interpolation=None)
+    for d in dirs:
+        try:
+            files = [f for f in os.listdir(d) if f.endswith('.desktop')]
+        except OSError:
+            continue
+        for fname in files:
+            fp = os.path.join(d, fname)
+            try:
+                cfg.clear()
+                cfg.read(fp, encoding='utf-8')
+                if not cfg.has_section('Desktop Entry'):
+                    continue
+                sec = cfg['Desktop Entry']
+                etype = sec.get('Type', 'Application')
+                if etype != 'Application':
+                    continue
+                nd = sec.get('NoDisplay', 'false').lower() == 'true'
+                hidden = sec.get('Hidden', 'false').lower() == 'true'
+                if nd or hidden:
+                    continue
+                name = sec.get('Name', fname)
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+                entries.append(_DesktopEntry(
+                    name=name,
+                    generic_name=sec.get('GenericName', ''),
+                    exec_cmd=sec.get('Exec', ''),
+                    icon=sec.get('Icon', ''),
+                    categories=sec.get('Categories', ''),
+                    keywords=sec.get('Keywords', ''),
+                    no_display=nd,
+                    terminal=sec.get('Terminal', 'false').lower() == 'true',
+                ))
+            except Exception:
+                continue
+    entries.sort(key=lambda e: e.name.lower())
+    return entries
+
+
+def _resolve_icon(icon_name, size=48):
+    if not icon_name:
+        return QIcon()
+    if os.path.isabs(icon_name) and os.path.isfile(icon_name):
+        return QIcon(icon_name)
+    theme_icon = QIcon.fromTheme(icon_name)
+    if not theme_icon.isNull():
+        return theme_icon
+    for ext in ('png', 'svg', 'xpm'):
+        for base in [f'/usr/share/icons/hicolor/{size}x{size}/apps',
+                     '/usr/share/pixmaps',
+                     f'/usr/share/icons/hicolor/scalable/apps']:
+            path = os.path.join(base, f'{icon_name}.{ext}')
+            if os.path.isfile(path):
+                return QIcon(path)
+    return QIcon()
+
+
+class _AppItemWidget(QFrame):
+    clicked = pyqtSignal()
+
+    def __init__(self, entry, parent=None):
+        super().__init__(parent)
+        self.entry = entry
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(40)
+        self.setStyleSheet(f"""
+            QFrame {{ background: transparent; border-radius: 6px; }}
+            QFrame:hover {{ background: {C['surface0']}; }}
+        """)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 4, 8, 4)
+        lay.setSpacing(10)
+        icon_lbl = QLabel()
+        ic = _resolve_icon(entry.icon)
+        if not ic.isNull():
+            icon_lbl.setPixmap(ic.pixmap(24, 24))
+        else:
+            icon_lbl.setText("◆")
+            icon_lbl.setStyleSheet(f"color: {C['blue']}; font-size: 16px;")
+        icon_lbl.setFixedSize(28, 28)
+        icon_lbl.setAlignment(Qt.AlignCenter)
+        lay.addWidget(icon_lbl)
+        name_lbl = QLabel(entry.name)
+        name_lbl.setStyleSheet(f"color: {C['text']}; font-size: 13px; background: transparent;")
+        lay.addWidget(name_lbl, 1)
+        if entry.generic_name and entry.generic_name != entry.name:
+            desc_lbl = QLabel(entry.generic_name)
+            desc_lbl.setStyleSheet(f"color: {C['subtext0']}; font-size: 10px; background: transparent;")
+            lay.addWidget(desc_lbl)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(e)
+
+
+class LauncherWidget(CompBase):
+    def __init__(self, data, parent=None):
+        super().__init__(data, parent)
+        self._entries = []
+        self._filtered = []
+        self._build_ui()
+        self._load_entries()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(6)
+
+        title_row = QHBoxLayout()
+        title_lbl = QLabel("🔍  应用启动器")
+        title_lbl.setStyleSheet(f"color: {C['text']}; font-size: 14px; font-weight: bold; background: transparent;")
+        title_row.addWidget(title_lbl)
+        title_row.addStretch()
+        refresh_btn = QPushButton("↻")
+        refresh_btn.setFixedSize(24, 24)
+        refresh_btn.setCursor(Qt.PointingHandCursor)
+        refresh_btn.setStyleSheet(f"""
+            QPushButton {{ background: {_bg('surface0')}; color: {C['text']}; border: none; border-radius: 12px; font-size: 14px; }}
+            QPushButton:hover {{ background: {_bg('surface1')}; }}
+        """)
+        refresh_btn.clicked.connect(self._load_entries)
+        title_row.addWidget(refresh_btn)
+        lay.addLayout(title_row)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("搜索应用…")
+        self._search.setStyleSheet(f"""
+            QLineEdit {{
+                background: {_bg('surface0')}; color: {C['text']}; border: 1px solid {C['surface1']};
+                border-radius: 8px; padding: 6px 12px; font-size: 13px;
+            }}
+            QLineEdit:focus {{ border-color: {C['blue']}; }}
+        """)
+        self._search.textChanged.connect(self._filter)
+        lay.addWidget(self._search)
+
+        self._count_lbl = QLabel()
+        self._count_lbl.setStyleSheet(f"color: {C['subtext0']}; font-size: 10px; background: transparent;")
+        lay.addWidget(self._count_lbl)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(f"QScrollArea {{ background: transparent; border: none; }}" + _scrollbar_style(6))
+        self._list_container = QWidget()
+        self._list_container.setStyleSheet("background: transparent;")
+        self._list_layout = QVBoxLayout(self._list_container)
+        self._list_layout.setContentsMargins(0, 0, 0, 0)
+        self._list_layout.setSpacing(2)
+        self._list_layout.addStretch()
+        scroll.setWidget(self._list_container)
+        lay.addWidget(scroll, 1)
+
+    def _load_entries(self):
+        self._entries = _scan_desktop_entries()
+        self._filter()
+
+    def _filter(self):
+        query = self._search.text().strip()
+        if query:
+            self._filtered = [e for e in self._entries if e.matches(query)]
+        else:
+            self._filtered = list(self._entries)
+        self._rebuild_list()
+
+    def _rebuild_list(self):
+        while self._list_layout.count():
+            item = self._list_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        show = self._filtered[:100]
+        for entry in show:
+            item = _AppItemWidget(entry, self._list_container)
+            item.clicked.connect(lambda e=entry: self._launch(e))
+            self._list_layout.addWidget(item)
+        self._list_layout.addStretch()
+        total = len(self._filtered)
+        self._count_lbl.setText(f"共 {total} 个应用" + (f"（显示前 100）" if total > 100 else ""))
+
+    def _launch(self, entry):
+        cmd = entry.exec_cmd
+        cmd = re.sub(r'%[fFuUdDnNickvm]', '', cmd).strip()
+        if not cmd:
+            return
+        try:
+            if entry.terminal:
+                terminal_cmds = ['x-terminal-emulator', 'gnome-terminal', 'xterm']
+                for t in terminal_cmds:
+                    if subprocess.run(['which', t], capture_output=True).returncode == 0:
+                        subprocess.Popen([t, '-e', cmd])
+                        return
+            subprocess.Popen(cmd, shell=True, start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+
+NOTE_COLORS = [
+    ("#f9e2af", "#1e1e2e"),
+    ("#a6e3a1", "#1e1e2e"),
+    ("#89b4fa", "#1e1e2e"),
+    ("#f38ba8", "#1e1e2e"),
+    ("#cba6f7", "#1e1e2e"),
+    ("#fab387", "#1e1e2e"),
+    ("#94e2d5", "#1e1e2e"),
+]
+
+
+class NoteWidget(CompBase):
+    def __init__(self, data, parent=None):
+        super().__init__(data, parent)
+        self._parse_note_data()
+        self._build_ui()
+
+    def refresh_theme(self):
+        if hasattr(self, '_text_edit') and not self._md_mode:
+            self._note_text = self._text_edit.toPlainText()
+        self._save_cmd()
+        super().refresh_theme()
+
+    def _parse_note_data(self):
+        raw = self.data.cmd.strip()
+        parts = raw.split("|", 2) if raw else []
+        self._color_idx = 0
+        self._note_text = ""
+        if len(parts) >= 1:
+            try:
+                self._color_idx = int(parts[0]) % len(NOTE_COLORS)
+            except ValueError:
+                pass
+        if len(parts) >= 2:
+            self._note_text = parts[1]
+
+    def _build_ui(self):
+        bg, fg = NOTE_COLORS[self._color_idx]
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        self._header = QWidget()
+        self._header.setFixedHeight(32)
+        self._header.setStyleSheet(f"background: {bg}; border-radius: 0px;")
+        h_lay = QHBoxLayout(self._header)
+        h_lay.setContentsMargins(10, 4, 6, 4)
+
+        self._title_lbl = QLabel(self.data.name or "便签")
+        self._title_lbl.setStyleSheet(f"color: {fg}; font-size: 14px; font-weight: bold; background: transparent;")
+        h_lay.addWidget(self._title_lbl, 1)
+
+        self._md_mode = False
+        self._md_btn = QPushButton("Md")
+        self._md_btn.setFixedSize(24, 20); self._md_btn.setCursor(Qt.PointingHandCursor)
+        self._md_btn.setStyleSheet(f"QPushButton{{background:transparent;color:{fg};border:1px solid {fg}44;"
+                                   f"border-radius:4px;font-size:9px;font-weight:bold;}}"
+                                   f"QPushButton:hover{{background:{fg}22;}}")
+        self._md_btn.clicked.connect(self._toggle_md)
+        h_lay.addWidget(self._md_btn)
+
+        self._color_btns = []
+        for ci in range(len(NOTE_COLORS)):
+            btn = QPushButton()
+            c_bg, _ = NOTE_COLORS[ci]
+            btn.setFixedSize(16, 16)
+            btn.setCursor(Qt.PointingHandCursor)
+            border = "2px solid #000" if ci == self._color_idx else "1px solid rgba(0,0,0,0.3)"
+            btn.setStyleSheet(f"QPushButton {{ background: {c_bg}; border: {border}; border-radius: 8px; }}"
+                              f"QPushButton:hover {{ border: 2px solid #000; }}")
+            btn.clicked.connect(lambda _, idx=ci: self._change_color(idx))
+            h_lay.addWidget(btn)
+            self._color_btns.append(btn)
+
+        lay.addWidget(self._header)
+
+        self._text_edit = QTextEdit()
+        self._text_edit.setPlainText(self._note_text)
+        self._text_style = (f"QTextEdit {{ background: {bg}88; color: {C['text']}; border: none;"
+                            f"font-size: 13px; padding: 8px; font-family: 'Noto Sans CJK SC','Microsoft YaHei',sans-serif; }}")
+        self._text_edit.setStyleSheet(self._text_style)
+        self._text_edit.textChanged.connect(self._save_text)
+        lay.addWidget(self._text_edit, 1)
+
+    def _change_color(self, idx):
+        self._color_idx = idx
+        self._save_cmd()
+        bg, fg = NOTE_COLORS[idx]
+        self._header.setStyleSheet(f"background: {bg}; border-radius: 0px;")
+        self._title_lbl.setStyleSheet(f"color: {fg}; font-size: 14px; font-weight: bold; background: transparent;")
+        self._text_style = (f"QTextEdit {{ background: {bg}88; color: {C['text']}; border: none;"
+                            f"font-size: 13px; padding: 8px; font-family: 'Noto Sans CJK SC','Microsoft YaHei',sans-serif; }}")
+        self._text_edit.setStyleSheet(self._text_style)
+        self._md_btn.setStyleSheet(f"QPushButton{{background:transparent;color:{fg};border:1px solid {fg}44;"
+                                   f"border-radius:4px;font-size:9px;font-weight:bold;}}"
+                                   f"QPushButton:hover{{background:{fg}22;}}")
+        for ci, btn in enumerate(self._color_btns):
+            c_bg, _ = NOTE_COLORS[ci]
+            border = "2px solid #000" if ci == idx else "1px solid rgba(0,0,0,0.3)"
+            btn.setStyleSheet(f"QPushButton {{ background: {c_bg}; border: {border}; border-radius: 8px; }}"
+                              f"QPushButton:hover {{ border: 2px solid #000; }}")
+
+    def _toggle_md(self):
+        if self._md_mode:
+            self._md_mode = False
+            self._md_btn.setText("Md")
+            self._text_edit.setReadOnly(False)
+            self._text_edit.textChanged.disconnect()
+            self._text_edit.setPlainText(self._note_text)
+            self._text_edit.textChanged.connect(self._save_text)
+            self._text_edit.setStyleSheet(self._text_style)
+        else:
+            self._md_mode = True
+            self._md_btn.setText("✎")
+            self._note_text = self._text_edit.toPlainText()
+            self._save_cmd()
+            self._text_edit.setReadOnly(True)
+            html = self._md_to_html(self._note_text)
+            bg, _ = NOTE_COLORS[self._color_idx]
+            self._text_edit.setStyleSheet(
+                self._text_style + f"\nQTextEdit {{ selection-background-color: {C['surface1']}; }}")
+            self._text_edit.setHtml(html)
+
+    @staticmethod
+    def _md_to_html(md):
+        import re
+        lines = md.split("\n")
+        html_lines = []
+        in_code = False
+        in_list = False
+        for line in lines:
+            if line.startswith("```"):
+                if in_code:
+                    html_lines.append("</pre>")
+                    in_code = False
+                else:
+                    html_lines.append(f"<pre style='background:{_bg('surface0')};padding:8px;"
+                                      f"border-radius:6px;font-size:12px;color:{C['green']};'>")
+                    in_code = True
+                continue
+            if in_code:
+                html_lines.append(line.replace("<", "&lt;").replace(">", "&gt;"))
+                continue
+
+            escaped = line.replace("<", "&lt;").replace(">", "&gt;")
+
+            if escaped.startswith("### "):
+                escaped = f"<h3 style='margin:4px 0;font-size:14px;color:{C['mauve']};'>{escaped[4:]}</h3>"
+            elif escaped.startswith("## "):
+                escaped = f"<h2 style='margin:4px 0;font-size:15px;color:{C['mauve']};'>{escaped[3:]}</h2>"
+            elif escaped.startswith("# "):
+                escaped = f"<h1 style='margin:4px 0;font-size:16px;color:{C['mauve']};'>{escaped[2:]}</h1>"
+            elif escaped.startswith("- ") or escaped.startswith("* "):
+                escaped = f"<li style='margin-left:16px;'>{escaped[2:]}</li>"
+            elif re.match(r'^\d+\.\s', escaped):
+                ol_text = re.sub(r'^[0-9]+\.\s', '', escaped)
+                escaped = f"<li style='margin-left:16px;'>{ol_text}</li>"
+            elif escaped.startswith("> "):
+                escaped = (f"<blockquote style='border-left:3px solid {C['overlay0']};padding-left:8px;"
+                           f"color:{C['subtext0']};margin:4px 0;'>{escaped[2:]}</blockquote>")
+            elif escaped.strip() == "---" or escaped.strip() == "***":
+                escaped = f"<hr style='border:1px solid {C['surface1']};margin:6px 0;'>"
+            elif escaped.strip() == "":
+                escaped = "<br>"
+            else:
+                escaped = f"<p style='margin:2px 0;'>{escaped}</p>"
+
+            escaped = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', escaped)
+            escaped = re.sub(r'\*(.+?)\*', r'<i>\1</i>', escaped)
+            escaped = re.sub(r'`(.+?)`', f'<code style="background:{C["surface0"]};padding:1px 4px;'
+                             f'border-radius:3px;font-size:12px;">\\1</code>', escaped)
+            escaped = re.sub(r'\[(.+?)\]\((.+?)\)',
+                             f'<a style="color:{C["blue"]};text-decoration:underline;" href="\\2">\\1</a>',
+                             escaped)
+
+            html_lines.append(escaped)
+
+        if in_code:
+            html_lines.append("</pre>")
+        return "\n".join(html_lines)
+
+    def _save_text(self):
+        if not self._md_mode:
+            self._note_text = self._text_edit.toPlainText()
+            self._save_cmd()
+
+    def _save_cmd(self):
+        self.data.cmd = f"{self._color_idx}|{self._note_text}"
+        main_win = self.window()
+        if hasattr(main_win, '_save_panels'):
+            main_win._save_panels()
+
+
+_QUICK_ACTIONS = [
+    ("system-lock-screen", "锁屏", "loginctl lock-session", C['blue'], False),
+    ("system-suspend", "挂起", "systemctl suspend", C['lavender'], False),
+    ("camera-photo", "截图", "gnome-screenshot -i", C['teal'], False),
+    ("system-file-manager", "文件", "xdg-open ~", C['green'], False),
+    ("preferences-system", "设置", "gnome-control-center", C['sky'], False),
+    ("system-reboot", "重启", "systemctl reboot", C['red'], True),
+    ("system-shutdown", "关机", "systemctl poweroff", C['red'], True),
+    ("system-log-out", "注销", "gnome-session-quit --logout --no-prompt", C['red'], True),
+]
+
+
+class _QAButton(QFrame):
+    clicked = pyqtSignal()
+
+    def __init__(self, icon_name, label, color, dangerous, parent=None):
+        super().__init__(parent)
+        self._color = color
+        self._dangerous = dangerous
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(72, 72)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 6, 0, 4)
+        lay.setSpacing(2)
+        lay.setAlignment(Qt.AlignCenter)
+
+        icon_lbl = QLabel()
+        icon_lbl.setAlignment(Qt.AlignCenter)
+        icon_lbl.setStyleSheet("background: transparent;")
+        icon_lbl.setFixedSize(28, 28)
+        qicon = QIcon.fromTheme(icon_name)
+        if not qicon.isNull():
+            icon_lbl.setPixmap(qicon.pixmap(28, 28))
+        else:
+            icon_lbl.setText(icon_name[:2])
+            icon_lbl.setStyleSheet(f"font-size:20px; background:transparent; color:{C['text']};")
+        lay.addWidget(icon_lbl, 0, Qt.AlignCenter)
+
+        name_lbl = QLabel(label)
+        name_lbl.setAlignment(Qt.AlignCenter)
+        name_lbl.setStyleSheet(f"color: {C['subtext0']}; font-size: 10px; background: transparent;")
+        lay.addWidget(name_lbl)
+
+        self._update_style(False)
+
+    def _update_style(self, hovered):
+        if hovered:
+            self.setStyleSheet(f"_QAButton {{ background: {self._color}; border-radius: 14px; }}")
+        else:
+            self.setStyleSheet(f"""
+                _QAButton {{ background: {_bg('surface0')}; border-radius: 14px; }}
+                _QAButton:hover {{ background: {self._color}44; }}
+            """)
+
+    def enterEvent(self, e):
+        self._update_style(True)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._update_style(False)
+        super().leaveEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(e)
+
+
+class QuickActionWidget(CompBase):
+    def __init__(self, data, parent=None):
+        super().__init__(data, parent)
+        self._build_ui()
+        self._vol_timer = QTimer(self)
+        self._vol_timer.timeout.connect(self._poll_volume)
+        self._vol_timer.start(2000)
+        QTimer.singleShot(200, self._poll_volume)
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(6)
+
+        from PyQt5.QtWidgets import QGridLayout, QSlider
+        grid = QGridLayout()
+        grid.setSpacing(8)
+
+        cols = 4
+        for i, (icon, name, cmd, color, dangerous) in enumerate(_QUICK_ACTIONS):
+            btn = _QAButton(icon, name, color, dangerous, self)
+            btn.clicked.connect(lambda c=cmd, n=name, d=dangerous: self._run(c, n, d))
+            grid.addWidget(btn, i // cols, i % cols, Qt.AlignCenter)
+
+        lay.addLayout(grid)
+
+        vol_row = QHBoxLayout(); vol_row.setSpacing(8)
+        self._is_muted = False
+        self._mute_btn = QPushButton()
+        self._mute_btn.setFixedSize(32, 32)
+        self._mute_btn.setCursor(Qt.PointingHandCursor)
+        self._mute_btn.clicked.connect(self._toggle_mute)
+        self._update_mute_btn_style()
+        vol_row.addWidget(self._mute_btn)
+        self._vol_slider = QSlider(Qt.Horizontal)
+        self._vol_slider.setRange(0, 100)
+        self._vol_slider.setValue(50)
+        self._vol_slider.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                background: {_bg('surface1')}; height: 6px; border-radius: 3px;
+            }}
+            QSlider::handle:horizontal {{
+                background: {C['blue']}; width: 16px; height: 16px; margin: -5px 0;
+                border-radius: 8px;
+            }}
+            QSlider::handle:horizontal:hover {{ background: {C.get('sapphire', C['blue'])}; }}
+            QSlider::sub-page:horizontal {{ background: {C['blue']}; border-radius: 3px; }}
+        """)
+        self._vol_slider.valueChanged.connect(self._set_volume)
+        vol_row.addWidget(self._vol_slider, 1)
+        self._vol_label = QLabel("50%")
+        self._vol_label.setFixedWidth(36)
+        self._vol_label.setStyleSheet(f"color:{C['text']};font-size:11px;background:transparent;")
+        vol_row.addWidget(self._vol_label)
+        lay.addLayout(vol_row)
+        lay.addStretch()
+
+    def _poll_volume(self):
+        try:
+            out = subprocess.check_output(
+                ["pactl", "get-sink-volume", "@DEFAULT_SINK@"],
+                timeout=2, stderr=subprocess.DEVNULL).decode()
+            import re
+            m = re.search(r'(\d+)%', out)
+            if m:
+                vol = int(m.group(1))
+                self._vol_slider.blockSignals(True)
+                self._vol_slider.setValue(vol)
+                self._vol_slider.blockSignals(False)
+                self._vol_label.setText(f"{vol}%")
+        except Exception:
+            pass
+        try:
+            out = subprocess.check_output(
+                ["pactl", "get-sink-mute", "@DEFAULT_SINK@"],
+                timeout=2, stderr=subprocess.DEVNULL).decode()
+            self._is_muted = "yes" in out.lower()
+            self._update_mute_btn_style()
+        except Exception:
+            pass
+
+    def _set_volume(self, val):
+        self._vol_label.setText(f"{val}%")
+        try:
+            subprocess.Popen(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{val}%"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    def _toggle_mute(self):
+        try:
+            subprocess.Popen(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        self._is_muted = not self._is_muted
+        self._update_mute_btn_style()
+        QTimer.singleShot(300, self._poll_volume)
+
+    def _update_mute_btn_style(self):
+        icon_name = "audio-volume-muted" if self._is_muted else "audio-volume-high"
+        qicon = QIcon.fromTheme(icon_name)
+        if not qicon.isNull():
+            self._mute_btn.setIcon(qicon)
+            self._mute_btn.setIconSize(self._mute_btn.size() * 0.6)
+        else:
+            self._mute_btn.setText("🔇" if self._is_muted else "🔊")
+        if self._is_muted:
+            self._mute_btn.setStyleSheet(
+                f"QPushButton{{background:{C['red']};border:none;border-radius:8px;font-size:16px;}}"
+                f"QPushButton:hover{{background:{C['peach']};}}")
+        else:
+            self._mute_btn.setStyleSheet(
+                f"QPushButton{{background:{_bg('surface0')};border:none;border-radius:8px;font-size:16px;}}"
+                f"QPushButton:hover{{background:{_bg('surface1')};}}")
+
+    def _run(self, cmd, name, dangerous):
+        if dangerous:
+            if not _confirm_dialog(self, "确认操作", f"确定要执行「{name}」吗？"):
+                return
+        try:
+            subprocess.Popen(cmd, shell=True, start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    def refresh_theme(self):
+        super().refresh_theme()
+        self._vol_timer = QTimer(self); self._vol_timer.timeout.connect(self._poll_volume)
+        self._vol_timer.start(2000)
+        QTimer.singleShot(200, self._poll_volume)
+
+
+# ---------------------------------------------------------------------------
+# Media Controller Widget (MPRIS D-Bus)
+# ---------------------------------------------------------------------------
+class MediaWidget(CompBase):
+    def __init__(self, data, parent=None):
+        super().__init__(data, parent)
+        self._title = ""; self._artist = ""; self._album = ""
+        self._playing = False; self._art_pixmap = None
+        self._timer = QTimer(self); self._timer.timeout.connect(self._tick); self._timer.start(1500)
+        self._build_ui()
+        QTimer.singleShot(100, self._tick)
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self); lay.setContentsMargins(16, 12, 16, 12); lay.setSpacing(6)
+        top = QHBoxLayout(); top.setSpacing(12)
+        self._art_label = QLabel(); self._art_label.setFixedSize(60, 60)
+        self._art_label.setStyleSheet(f"background: {_bg('surface1')}; border-radius: 8px;")
+        self._art_label.setAlignment(Qt.AlignCenter)
+        top.addWidget(self._art_label)
+        info = QVBoxLayout(); info.setSpacing(2)
+        self._title_lbl = QLabel("无媒体播放")
+        self._title_lbl.setStyleSheet(f"color:{C['text']};font-size:14px;font-weight:bold;background:transparent;")
+        self._artist_lbl = QLabel("")
+        self._artist_lbl.setStyleSheet(f"color:{C['subtext0']};font-size:11px;background:transparent;")
+        self._album_lbl = QLabel("")
+        self._album_lbl.setStyleSheet(f"color:{C['overlay0']};font-size:10px;background:transparent;")
+        info.addWidget(self._title_lbl); info.addWidget(self._artist_lbl); info.addWidget(self._album_lbl)
+        info.addStretch()
+        top.addLayout(info); top.addStretch()
+        lay.addLayout(top)
+        btns = QHBoxLayout(); btns.setSpacing(12); btns.addStretch()
+        _media_icons = [
+            ("media-skip-backward", "Previous", 36),
+            ("media-playback-start", "PlayPause", 44),
+            ("media-skip-forward", "Next", 36),
+        ]
+        self._play_btn = None
+        for icon_name, cmd, sz in _media_icons:
+            b = QPushButton(); b.setFixedSize(sz, sz); b.setCursor(Qt.PointingHandCursor)
+            qicon = QIcon.fromTheme(icon_name)
+            if not qicon.isNull():
+                b.setIcon(qicon)
+                b.setIconSize(b.size() * 0.55)
+            else:
+                fallback = {"Previous": "◂◂", "PlayPause": "▶", "Next": "▸▸"}
+                b.setText(fallback.get(cmd, "?"))
+            is_main = (cmd == "PlayPause")
+            if is_main:
+                b.setStyleSheet(f"""QPushButton {{background:{C['blue']};color:{C['crust']};
+                    border:none;border-radius:{sz // 2}px;}}
+                    QPushButton:hover {{background:{C['lavender']};}}""")
+                self._play_btn = b
+            else:
+                b.setStyleSheet(f"""QPushButton {{background:{_bg('surface1')};color:{C['text']};
+                    border:none;border-radius:{sz // 2}px;}}
+                    QPushButton:hover {{background:{C['surface2']};}}""")
+            b.clicked.connect(lambda _, c=cmd: self._mpris_cmd(c))
+            btns.addWidget(b)
+        btns.addStretch()
+        lay.addLayout(btns)
+
+    def _mpris_cmd(self, method):
+        try:
+            subprocess.Popen(
+                ["dbus-send", "--print-reply", "--dest=org.mpris.MediaPlayer2.*",
+                 "/org/mpris/MediaPlayer2", f"org.mpris.MediaPlayer2.Player.{method}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            players = self._get_players()
+            if players:
+                try:
+                    subprocess.Popen(
+                        ["dbus-send", "--print-reply", f"--dest={players[0]}",
+                         "/org/mpris/MediaPlayer2", f"org.mpris.MediaPlayer2.Player.{method}"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+
+    def _get_players(self):
+        try:
+            out = subprocess.check_output(
+                ["dbus-send", "--session", "--dest=org.freedesktop.DBus",
+                 "--type=method_call", "--print-reply",
+                 "/org/freedesktop/DBus", "org.freedesktop.DBus.ListNames"],
+                timeout=2, stderr=subprocess.DEVNULL).decode()
+            return [line.strip().strip('"') for line in out.split('\n')
+                    if 'org.mpris.MediaPlayer2.' in line]
+        except Exception:
+            return []
+
+    def _tick(self):
+        players = self._get_players()
+        if not players:
+            self._title_lbl.setText("无媒体播放"); self._artist_lbl.setText(""); self._album_lbl.setText("")
+            return
+        player = players[0]
+        try:
+            out = subprocess.check_output(
+                ["dbus-send", "--session", "--print-reply", f"--dest={player}",
+                 "/org/mpris/MediaPlayer2",
+                 "org.freedesktop.DBus.Properties.Get",
+                 "string:org.mpris.MediaPlayer2.Player", "string:Metadata"],
+                timeout=2, stderr=subprocess.DEVNULL).decode()
+            title = self._extract_meta(out, "xesam:title")
+            artist = self._extract_meta(out, "xesam:artist")
+            album = self._extract_meta(out, "xesam:album")
+            self._title_lbl.setText(title or "未知曲目")
+            self._artist_lbl.setText(artist or "")
+            self._album_lbl.setText(album or "")
+        except Exception:
+            pass
+
+    def refresh_theme(self):
+        super().refresh_theme()
+        self._timer = QTimer(self); self._timer.timeout.connect(self._tick); self._timer.start(1500)
+        QTimer.singleShot(100, self._tick)
+
+    @staticmethod
+    def _extract_meta(raw, key):
+        idx = raw.find(key)
+        if idx < 0:
+            return ""
+        sub = raw[idx:]
+        for marker in ['string "', 'variant       string "']:
+            si = sub.find(marker)
+            if si >= 0:
+                start = si + len(marker)
+                end = sub.find('"', start)
+                if end > start:
+                    return sub[start:end]
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Clipboard Manager Widget
+# ---------------------------------------------------------------------------
+class ClipboardWidget(CompBase):
+    _shared_history = []
+    _shared_img_history = []
+
+    def __init__(self, data, parent=None):
+        super().__init__(data, parent)
+        self._max = 30
+        self._last_text = ""
+        self._last_img_hash = 0
+        self._build_ui()
+        self._timer = QTimer(self); self._timer.timeout.connect(self._poll); self._timer.start(800)
+
+    def refresh_theme(self):
+        last = self._last_text
+        super().refresh_theme()
+        self._last_text = last
+        self._rebuild()
+        self._timer = QTimer(self); self._timer.timeout.connect(self._poll); self._timer.start(800)
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self); lay.setContentsMargins(12, 10, 12, 10); lay.setSpacing(6)
+        hdr = QHBoxLayout()
+        title = QLabel("📋 剪贴板历史")
+        title.setStyleSheet(f"color:{C['text']};font-size:14px;font-weight:bold;background:transparent;")
+        hdr.addWidget(title); hdr.addStretch()
+        cnt_lbl = QLabel(f"文本 {len(ClipboardWidget._shared_history)} · 图片 {len(ClipboardWidget._shared_img_history)}")
+        cnt_lbl.setStyleSheet(f"color:{C['subtext0']};font-size:10px;background:transparent;")
+        self._cnt_lbl = cnt_lbl
+        hdr.addWidget(cnt_lbl)
+        clr = QPushButton("清空"); clr.setCursor(Qt.PointingHandCursor)
+        clr.setStyleSheet(f"background:{_bg('surface1')};color:{C['red']};border:none;border-radius:8px;"
+                          f"font-size:11px;padding:4px 12px;")
+        clr.clicked.connect(self._clear)
+        hdr.addWidget(clr)
+        lay.addLayout(hdr)
+        sc = QScrollArea(); sc.setWidgetResizable(True)
+        sc.setStyleSheet(f"QScrollArea{{background:transparent;border:none;}}QScrollArea > QWidget{{background:transparent;}}{_scrollbar_style(6)}")
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._list_w = QWidget()
+        self._list_w.setStyleSheet("background:transparent;")
+        self._list_lay = QVBoxLayout(self._list_w); self._list_lay.setContentsMargins(0, 0, 0, 0)
+        self._list_lay.setSpacing(4); self._list_lay.addStretch()
+        sc.setWidget(self._list_w)
+        lay.addWidget(sc)
+
+    def _poll(self):
+        cb = QApplication.clipboard()
+        mime = cb.mimeData()
+        if mime and mime.hasImage():
+            img = cb.image()
+            if not img.isNull():
+                h = hash(img.bits().asstring(img.byteCount()) if hasattr(img.bits(), 'asstring')
+                         else img.sizeInBytes())
+                if h != self._last_img_hash:
+                    self._last_img_hash = h
+                    pm = QPixmap.fromImage(img)
+                    ClipboardWidget._shared_img_history.insert(0, pm)
+                    if len(ClipboardWidget._shared_img_history) > 10:
+                        ClipboardWidget._shared_img_history = ClipboardWidget._shared_img_history[:10]
+                    self._rebuild()
+                    return
+        text = cb.text()
+        if text and text != self._last_text:
+            self._last_text = text
+            if text in ClipboardWidget._shared_history:
+                ClipboardWidget._shared_history.remove(text)
+            ClipboardWidget._shared_history.insert(0, text)
+            if len(ClipboardWidget._shared_history) > self._max:
+                ClipboardWidget._shared_history = ClipboardWidget._shared_history[:self._max]
+            self._rebuild()
+
+    def _rebuild(self):
+        while self._list_lay.count() > 1:
+            item = self._list_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        idx = 0
+        for pm in ClipboardWidget._shared_img_history:
+            frame = QFrame()
+            frame.setCursor(Qt.PointingHandCursor)
+            frame.setStyleSheet(f"QFrame{{background:{_bg('surface0')};border-radius:6px;padding:4px;}}"
+                                f"QFrame:hover{{background:{_bg('surface1')};}}")
+            fl = QHBoxLayout(frame); fl.setContentsMargins(6, 4, 6, 4); fl.setSpacing(6)
+            thumb = QLabel()
+            scaled = pm.scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            thumb.setPixmap(scaled)
+            thumb.setStyleSheet("background:transparent;")
+            fl.addWidget(thumb)
+            info = QLabel(f"🖼 图片 {pm.width()}×{pm.height()}")
+            info.setStyleSheet(f"color:{C['text']};font-size:10px;background:transparent;")
+            fl.addWidget(info, 1)
+            frame.mousePressEvent = lambda e, p=pm: self._paste_image(p)
+            self._list_lay.insertWidget(idx, frame); idx += 1
+        for text in ClipboardWidget._shared_history:
+            preview = text[:80].replace('\n', ' ')
+            btn = QPushButton(preview); btn.setCursor(Qt.PointingHandCursor)
+            btn.setToolTip(text[:300])
+            btn.setStyleSheet(f"""QPushButton {{
+                background:{_bg('surface0')};color:{C['text']};border:none;border-radius:6px;
+                text-align:left;padding:6px 8px;font-size:11px;}}
+                QPushButton:hover {{background:{_bg('surface1')};}}""")
+            btn.clicked.connect(lambda _, t=text: self._paste_text(t))
+            self._list_lay.insertWidget(idx, btn); idx += 1
+        self._cnt_lbl.setText(f"文本 {len(ClipboardWidget._shared_history)} · 图片 {len(ClipboardWidget._shared_img_history)}")
+
+    def _paste_text(self, text):
+        QApplication.clipboard().setText(text)
+
+    def _paste_image(self, pm):
+        QApplication.clipboard().setPixmap(pm)
+
+    def _clear(self):
+        ClipboardWidget._shared_history.clear()
+        ClipboardWidget._shared_img_history.clear()
+        self._rebuild()
+
+
+class _ClipboardPopup(QWidget):
+    """Themed floating popup for quick clipboard access via hotkey."""
+
+    _instance = None
+
+    @classmethod
+    def get_or_create(cls, parent=None):
+        try:
+            if cls._instance is not None and cls._instance.isVisible():
+                cls._instance.hide()
+                return cls._instance
+        except RuntimeError:
+            cls._instance = None
+        cls._instance = cls(parent)
+        return cls._instance
+
+    def __init__(self, parent=None):
+        super().__init__(None, Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setFixedWidth(380)
+        self.setMaximumHeight(500)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, False)
+        self.installEventFilter(self)
+        self._build_ui()
+
+    def _build_ui(self):
+        self.setStyleSheet(f"""
+            _ClipboardPopup {{
+                background: {C['base']}; border: 1px solid {C['surface1']}; border-radius: 14px;
+            }}""")
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(30); shadow.setOffset(0, 6); shadow.setColor(QColor(0, 0, 0, 120))
+        self.setGraphicsEffect(shadow)
+
+        lay = QVBoxLayout(self); lay.setContentsMargins(14, 14, 14, 10); lay.setSpacing(8)
+
+        header = QHBoxLayout(); header.setSpacing(8)
+        icon_lbl = QLabel("📋")
+        icon_lbl.setStyleSheet(f"font-size:18px;background:transparent;")
+        header.addWidget(icon_lbl)
+        title = QLabel("剪贴板历史")
+        title.setStyleSheet(f"color:{C['text']};font-size:15px;font-weight:bold;background:transparent;")
+        header.addWidget(title)
+        header.addStretch()
+        count_lbl = QLabel()
+        count_lbl.setStyleSheet(f"color:{C['subtext0']};font-size:11px;background:transparent;")
+        header.addWidget(count_lbl)
+        self._count_lbl = count_lbl
+        lay.addLayout(header)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet(f"background:{C['surface0']};border:none;max-height:1px;")
+        lay.addWidget(sep)
+
+        sc = QScrollArea(); sc.setWidgetResizable(True)
+        sc.setFixedHeight(400)
+        sc.setStyleSheet(f"QScrollArea{{background:transparent;border:none;}}"
+                         f"QScrollArea>QWidget{{background:transparent;}}"
+                         f"{_scrollbar_style(6)}")
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._list_w = QWidget()
+        self._list_w.setStyleSheet("background:transparent;")
+        self._list_lay = QVBoxLayout(self._list_w)
+        self._list_lay.setContentsMargins(0, 0, 0, 0)
+        self._list_lay.setSpacing(4)
+        self._list_lay.addStretch()
+        sc.setWidget(self._list_w)
+        lay.addWidget(sc)
+
+        hint = QLabel("选择条目即可粘贴  ·  按 Esc 关闭")
+        hint.setAlignment(Qt.AlignCenter)
+        hint.setStyleSheet(f"color:{C['overlay0']};font-size:10px;background:transparent;")
+        lay.addWidget(hint)
+
+    def _rebuild(self):
+        while self._list_lay.count() > 1:
+            item = self._list_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        idx = 0
+        total = len(ClipboardWidget._shared_img_history) + len(ClipboardWidget._shared_history)
+        self._count_lbl.setText(f"{total} 条记录")
+
+        for pm in ClipboardWidget._shared_img_history:
+            frame = QFrame(); frame.setCursor(Qt.PointingHandCursor)
+            frame.setStyleSheet(f"""QFrame{{background:{C['surface0']};border-radius:8px;}}
+                QFrame:hover{{background:{C['surface1']};border:1px solid {C['blue']};}}""")
+            fl = QHBoxLayout(frame); fl.setContentsMargins(8, 6, 8, 6); fl.setSpacing(8)
+            thumb = QLabel()
+            scaled = pm.scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            thumb.setPixmap(scaled)
+            thumb.setStyleSheet("background:transparent;border-radius:4px;")
+            fl.addWidget(thumb)
+            info_lay = QVBoxLayout(); info_lay.setSpacing(1)
+            info = QLabel(f"图片  {pm.width()}×{pm.height()}")
+            info.setStyleSheet(f"color:{C['text']};font-size:11px;background:transparent;")
+            info_lay.addWidget(info)
+            tag = QLabel("🖼 图像")
+            tag.setStyleSheet(f"color:{C['subtext0']};font-size:9px;background:transparent;")
+            info_lay.addWidget(tag)
+            fl.addLayout(info_lay, 1)
+            frame.mousePressEvent = lambda e, p=pm: self._pick_image(p)
+            self._list_lay.insertWidget(idx, frame); idx += 1
+
+        for text in ClipboardWidget._shared_history:
+            preview = text[:120].replace(chr(10), " ↵ ")
+            frame = QFrame(); frame.setCursor(Qt.PointingHandCursor)
+            frame.setStyleSheet(f"""QFrame{{background:{C['surface0']};border-radius:8px;padding:8px 10px;}}
+                QFrame:hover{{background:{C['surface1']};border:1px solid {C['blue']};}}""")
+            fl = QVBoxLayout(frame); fl.setContentsMargins(10, 8, 10, 8); fl.setSpacing(2)
+            lbl = QLabel(preview)
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(f"color:{C['text']};font-size:12px;background:transparent;")
+            fl.addWidget(lbl)
+            if len(text) > 120:
+                more = QLabel(f"…共 {len(text)} 字符")
+                more.setStyleSheet(f"color:{C['overlay0']};font-size:9px;background:transparent;")
+                fl.addWidget(more)
+            frame.mousePressEvent = lambda e, t=text: self._pick_text(t)
+            self._list_lay.insertWidget(idx, frame); idx += 1
+
+        if total == 0:
+            empty = QLabel("剪贴板为空")
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setStyleSheet(f"color:{C['overlay0']};font-size:13px;padding:40px;background:transparent;")
+            self._list_lay.insertWidget(0, empty)
+
+    def _pick_text(self, text):
+        QApplication.clipboard().setText(text)
+        self.hide()
+        QTimer.singleShot(300, self._simulate_paste)
+
+    def _pick_image(self, pm):
+        QApplication.clipboard().setPixmap(pm)
+        self.hide()
+        QTimer.singleShot(300, self._simulate_paste)
+
+    @staticmethod
+    def _simulate_paste():
+        try:
+            from Xlib import X, display as xdisplay, XK, ext
+            d = xdisplay.Display()
+            root = d.screen().root
+            focus_win = d.get_input_focus().focus
+            ctrl_keycode = d.keysym_to_keycode(XK.string_to_keysym("Control_L"))
+            v_keycode = d.keysym_to_keycode(XK.string_to_keysym("v"))
+            import Xlib.protocol.event as xevent
+            for keycode in [ctrl_keycode, v_keycode]:
+                ev = xevent.KeyPress(time=X.CurrentTime, root=root, window=focus_win,
+                    same_screen=True, child=X.NONE, root_x=0, root_y=0, event_x=0, event_y=0,
+                    state=(X.ControlMask if keycode == v_keycode else 0), detail=keycode)
+                focus_win.send_event(ev, propagate=True)
+            for keycode in [v_keycode, ctrl_keycode]:
+                ev = xevent.KeyRelease(time=X.CurrentTime, root=root, window=focus_win,
+                    same_screen=True, child=X.NONE, root_x=0, root_y=0, event_x=0, event_y=0,
+                    state=(X.ControlMask if keycode == v_keycode else 0), detail=keycode)
+                focus_win.send_event(ev, propagate=True)
+            d.sync()
+            d.close()
+        except Exception as ex:
+            print(f"[Clipboard] paste simulate error: {ex}", flush=True)
+            try:
+                subprocess.Popen(["xdotool", "key", "ctrl+v"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            self.hide()
+            e.accept()
+        else:
+            super().keyPressEvent(e)
+
+    def eventFilter(self, obj, event):
+        from PyQt5.QtCore import QEvent
+        if event.type() == QEvent.WindowDeactivate:
+            QTimer.singleShot(100, self._check_deactivate)
+        return super().eventFilter(obj, event)
+
+    def _check_deactivate(self):
+        if not self.isActiveWindow():
+            self.hide()
+
+    def show_at_cursor(self):
+        self._rebuild()
+        pos = QCursor.pos()
+        screen = QApplication.screenAt(pos)
+        if screen:
+            sg = screen.availableGeometry()
+            x = min(pos.x(), sg.right() - self.width())
+            y = min(pos.y(), sg.bottom() - self.height())
+            self.move(max(x, sg.left()), max(y, sg.top()))
+        else:
+            self.move(pos)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.setFocus()
+
+# ---------------------------------------------------------------------------
+# Timer / Countdown Widget
+# ---------------------------------------------------------------------------
+class TimerWidget(CompBase):
+    def __init__(self, data, parent=None):
+        super().__init__(data, parent)
+        self._elapsed = 0
+        self._target = 0
+        self._running = False
+        self._mode = "stopwatch"
+        self._build_ui()
+        self._tick_timer = QTimer(self); self._tick_timer.timeout.connect(self._tick)
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self); lay.setContentsMargins(16, 12, 16, 12); lay.setSpacing(6)
+        self._display = QLabel("00:00:00")
+        self._display.setAlignment(Qt.AlignCenter)
+        self._display.setStyleSheet(f"color:{C['text']};font-size:36px;font-weight:bold;"
+                                    f"font-family:'JetBrains Mono','Courier New',monospace;"
+                                    f"background:transparent;")
+        lay.addWidget(self._display)
+        mode_row = QHBoxLayout(); mode_row.addStretch()
+        self._sw_btn = QPushButton("秒表"); self._cd_btn = QPushButton("倒计时")
+        for btn, m in [(self._sw_btn, "stopwatch"), (self._cd_btn, "countdown")]:
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedHeight(28)
+            btn.clicked.connect(lambda _, md=m: self._set_mode(md))
+            mode_row.addWidget(btn)
+        mode_row.addStretch()
+        lay.addLayout(mode_row)
+        self._input_row = QHBoxLayout(); self._input_row.addStretch()
+        self._min_edit = QLineEdit("5"); self._min_edit.setFixedWidth(50)
+        self._min_edit.setAlignment(Qt.AlignCenter)
+        self._min_edit.setValidator(QIntValidator(0, 999))
+        self._min_edit.setStyleSheet(f"background:{_bg('surface0')};color:{C['text']};border:1px solid {C['surface1']};"
+                                     f"border-radius:8px;padding:6px;font-size:13px;")
+        self._min_label = QLabel("分钟")
+        self._min_label.setStyleSheet(f"color:{C['subtext0']};font-size:12px;background:transparent;")
+        self._input_row.addWidget(self._min_edit); self._input_row.addWidget(self._min_label)
+        self._input_row.addStretch()
+        lay.addLayout(self._input_row)
+        btn_row = QHBoxLayout(); btn_row.addStretch()
+        self._start_btn = QPushButton("开始"); self._start_btn.setCursor(Qt.PointingHandCursor)
+        self._reset_btn = QPushButton("重置"); self._reset_btn.setCursor(Qt.PointingHandCursor)
+        for b in [self._start_btn, self._reset_btn]:
+            b.setFixedSize(70, 32)
+            btn_row.addWidget(b)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+        self._start_btn.clicked.connect(self._toggle)
+        self._reset_btn.clicked.connect(self._reset)
+        self._set_mode("stopwatch")
+        self._update_btn_styles()
+
+    def _update_btn_styles(self):
+        active = f"background:{C['blue']};color:{C['crust']};border:none;border-radius:8px;font-size:13px;padding:4px 12px;"
+        inactive = f"background:{_bg('surface1')};color:{C['text']};border:none;border-radius:8px;font-size:13px;padding:4px 12px;"
+        self._sw_btn.setStyleSheet(active if self._mode == "stopwatch" else inactive)
+        self._cd_btn.setStyleSheet(active if self._mode == "countdown" else inactive)
+        start_style = (f"background:{C['red']};color:{C['crust']};" if self._running
+                       else f"background:{C['green']};color:{C['crust']};")
+        self._start_btn.setStyleSheet(start_style + "border:none;border-radius:8px;font-size:13px;font-weight:bold;")
+        self._start_btn.setText("停止" if self._running else "开始")
+        self._reset_btn.setStyleSheet(f"background:{_bg('surface1')};color:{C['text']};border:none;"
+                                      f"border-radius:8px;font-size:13px;")
+
+    def _set_mode(self, mode):
+        self._mode = mode
+        self._reset()
+        visible = mode == "countdown"
+        self._min_edit.setVisible(visible)
+        self._min_label.setVisible(visible)
+        self._update_btn_styles()
+
+    def _toggle(self):
+        if self._running:
+            self._running = False; self._tick_timer.stop()
+        else:
+            if self._mode == "countdown":
+                try:
+                    mins = int(self._min_edit.text() or "0")
+                except ValueError:
+                    mins = 0
+                if mins <= 0 and self._target <= 0:
+                    return
+                if self._target <= 0:
+                    self._target = mins * 60
+                    self._elapsed = 0
+            self._running = True; self._tick_timer.start(100)
+        self._update_btn_styles()
+
+    def _reset(self):
+        self._running = False; self._tick_timer.stop()
+        self._elapsed = 0; self._target = 0
+        self._display.setText("00:00:00")
+        self._display.setStyleSheet(f"color:{C['text']};font-size:36px;font-weight:bold;"
+                                    f"font-family:'JetBrains Mono','Courier New',monospace;background:transparent;")
+        self._update_btn_styles()
+
+    def _tick(self):
+        self._elapsed += 0.1
+        if self._mode == "stopwatch":
+            t = int(self._elapsed)
+            h, m, s = t // 3600, (t % 3600) // 60, t % 60
+            ms = int((self._elapsed - t) * 10)
+            self._display.setText(f"{h:02d}:{m:02d}:{s:02d}.{ms}")
+        else:
+            remaining = max(0, self._target - self._elapsed)
+            t = int(remaining)
+            h, m, s = t // 3600, (t % 3600) // 60, t % 60
+            self._display.setText(f"{h:02d}:{m:02d}:{s:02d}")
+            if remaining <= 0:
+                self._running = False; self._tick_timer.stop()
+                self._display.setStyleSheet(
+                    f"color:{C['red']};font-size:36px;font-weight:bold;"
+                    f"font-family:'JetBrains Mono','Courier New',monospace;background:transparent;")
+                self._update_btn_styles()
+
+    def refresh_theme(self):
+        saved_elapsed = self._elapsed
+        saved_target = self._target
+        saved_running = self._running
+        saved_mode = self._mode
+        self._running = False
+        super().refresh_theme()
+        self._tick_timer = QTimer(self); self._tick_timer.timeout.connect(self._tick)
+        self._elapsed = saved_elapsed
+        self._target = saved_target
+        self._mode = saved_mode
+        self._set_mode(saved_mode)
+        self._elapsed = saved_elapsed
+        self._target = saved_target
+        if saved_running:
+            self._running = True; self._tick_timer.start(100)
+            self._update_btn_styles()
+
+
+# ---------------------------------------------------------------------------
+# Gallery / Photo Widget
+# ---------------------------------------------------------------------------
+class GalleryWidget(CompBase):
+    def __init__(self, data, parent=None):
+        super().__init__(data, parent)
+        self._images: list[str] = []
+        self._idx = 0
+        self._pixmap = None
+        self._interval = 5
+        self._build_ui()
+        self._slide_timer = QTimer(self); self._slide_timer.timeout.connect(self._next)
+        if data.cmd:
+            self._load_dir(data.cmd.split("|")[0].strip())
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self); lay.setContentsMargins(4, 4, 4, 4); lay.setSpacing(0)
+        self._img_label = QLabel(); self._img_label.setAlignment(Qt.AlignCenter)
+        self._img_label.setStyleSheet("background:transparent;")
+        self._img_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        lay.addWidget(self._img_label, 1)
+
+        self._browse_btn = QPushButton("\U0001f4c2", self)
+        self._browse_btn.setFixedSize(28, 28)
+        self._browse_btn.setCursor(Qt.PointingHandCursor)
+        self._browse_btn.setStyleSheet(
+            f"QPushButton{{background:rgba(0,0,0,0.4);color:white;border:none;border-radius:6px;font-size:14px;}}"
+            f"QPushButton:hover{{background:{C['blue']};color:{C['crust']};}}")
+        self._browse_btn.clicked.connect(self._browse)
+        self._browse_btn.setToolTip("选择图片目录")
+
+        _nav_s = (f"QPushButton{{background:rgba(0,0,0,0.35);color:white;"
+                  f"border:none;border-radius:16px;font-size:18px;font-weight:bold;}}"
+                  f"QPushButton:hover{{background:rgba(0,0,0,0.65);}}")
+        self._prev_btn = QPushButton("\u2039", self)
+        self._prev_btn.setFixedSize(32, 32); self._prev_btn.setCursor(Qt.PointingHandCursor)
+        self._prev_btn.setStyleSheet(_nav_s)
+        self._prev_btn.clicked.connect(self._prev)
+        self._prev_btn.hide()
+
+        self._next_btn = QPushButton("\u203a", self)
+        self._next_btn.setFixedSize(32, 32); self._next_btn.setCursor(Qt.PointingHandCursor)
+        self._next_btn.setStyleSheet(_nav_s)
+        self._next_btn.clicked.connect(self._next)
+        self._next_btn.hide()
+
+        self._counter = QLabel("", self)
+        self._counter.setAlignment(Qt.AlignCenter)
+        self._counter.setStyleSheet(
+            "color:white;font-size:10px;background:rgba(0,0,0,0.4);border-radius:8px;padding:2px 8px;")
+        self._counter.hide()
+        self._browse_btn.hide()
+
+    def enterEvent(self, e):
+        super().enterEvent(e)
+        self._browse_btn.show()
+        if self._images:
+            self._prev_btn.show(); self._next_btn.show(); self._counter.show()
+
+    def leaveEvent(self, e):
+        super().leaveEvent(e)
+        self._browse_btn.hide(); self._prev_btn.hide(); self._next_btn.hide(); self._counter.hide()
+
+    def _browse(self):
+        d = QFileDialog.getExistingDirectory(self, "选择图片目录", os.path.expanduser("~"))
+        if d:
+            self._load_dir(d)
+
+    def _load_dir(self, path):
+        if not path or not os.path.isdir(path):
+            return
+        exts = {'.png', '.jpg', '.jpeg', '.bmp', '.webp', '.gif'}
+        self._images = sorted([os.path.join(path, f) for f in os.listdir(path)
+                                if os.path.splitext(f)[1].lower() in exts])
+        self._idx = 0
+        self.data.cmd = path
+        if self._images:
+            self._show_image()
+            self._slide_timer.start(self._interval * 1000)
+        self._save_cmd()
+
+    def _save_cmd(self):
+        if hasattr(self.data, '_save_cb'):
+            self.data._save_cb()
+
+    def _show_image(self):
+        if not self._images:
+            return
+        path = self._images[self._idx]
+        pm = QPixmap(path)
+        if not pm.isNull():
+            self._pixmap = pm
+            lbl_size = self._img_label.size()
+            scaled = pm.scaled(lbl_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self._img_label.setPixmap(scaled)
+        self._counter.setText(f"{self._idx + 1} / {len(self._images)}")
+
+    def _next(self):
+        if self._images:
+            self._idx = (self._idx + 1) % len(self._images)
+            self._show_image()
+
+    def _prev(self):
+        if self._images:
+            self._idx = (self._idx - 1) % len(self._images)
+            self._show_image()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self._pixmap and not self._pixmap.isNull():
+            scaled = self._pixmap.scaled(self._img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self._img_label.setPixmap(scaled)
+        self._position_overlays()
+
+    def _position_overlays(self):
+        w, h = self.width(), self.height()
+        self._browse_btn.move(w - 34, 6)
+        cy = h // 2 - 16
+        self._prev_btn.move(8, cy)
+        self._next_btn.move(w - 40, cy)
+        self._counter.adjustSize()
+        self._counter.move((w - self._counter.width()) // 2, h - 24)
+
+    def refresh_theme(self):
+        saved_images = self._images
+        saved_idx = self._idx
+        saved_pixmap = self._pixmap
+        saved_interval = self._interval
+        super().refresh_theme()
+        self._slide_timer = QTimer(self); self._slide_timer.timeout.connect(self._next)
+        self._images = saved_images
+        self._idx = saved_idx
+        self._pixmap = saved_pixmap
+        self._interval = saved_interval
+        if self._images:
+            self._show_image()
+            self._slide_timer.start(self._interval * 1000)
+
+
+# ---------------------------------------------------------------------------
+# System Info Widget
+# ---------------------------------------------------------------------------
+class SysInfoWidget(CompBase):
+    def __init__(self, data, parent=None):
+        super().__init__(data, parent)
+        self._build_ui()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self); lay.setContentsMargins(16, 12, 16, 12); lay.setSpacing(6)
+        title = QLabel("💻 系统信息")
+        title.setStyleSheet(f"color:{C['text']};font-size:14px;font-weight:bold;background:transparent;")
+        lay.addWidget(title)
+        import platform
+        import socket
+        info_items = []
+        info_items.append(("主机名", socket.gethostname()))
+        info_items.append(("用  户", os.environ.get("USER", "unknown")))
+        info_items.append(("系  统", f"{platform.system()} {platform.release()}"))
+        info_items.append(("发行版", platform.freedesktop_os_release().get("PRETTY_NAME", "N/A")
+                           if hasattr(platform, 'freedesktop_os_release') else platform.platform()))
+        info_items.append(("架  构", platform.machine()))
+        info_items.append(("Python", platform.python_version()))
+        try:
+            info_items.append(("CPU", self._cpu_model()))
+        except Exception:
+            pass
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            info_items.append(("内  存", f"{mem.total / (1024**3):.1f} GB"))
+        except Exception:
+            pass
+        try:
+            ips = self._get_ips()
+            for name, ip in ips:
+                info_items.append((name, ip))
+        except Exception:
+            pass
+        try:
+            info_items.append(("桌面环境", os.environ.get("XDG_CURRENT_DESKTOP", "N/A")))
+            info_items.append(("显示协议", os.environ.get("XDG_SESSION_TYPE", "N/A")))
+        except Exception:
+            pass
+        try:
+            uptime = self._uptime()
+            if uptime:
+                info_items.append(("运行时间", uptime))
+        except Exception:
+            pass
+
+        for label, value in info_items:
+            row = QHBoxLayout(); row.setSpacing(8)
+            lbl = QLabel(label)
+            lbl.setStyleSheet(f"color:{C['subtext0']};font-size:11px;background:transparent;min-width:60px;")
+            val = QLabel(str(value))
+            val.setStyleSheet(f"color:{C['text']};font-size:11px;background:transparent;")
+            val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            row.addWidget(lbl); row.addWidget(val); row.addStretch()
+            lay.addLayout(row)
+        lay.addStretch()
+
+    @staticmethod
+    def _cpu_model():
+        try:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if "model name" in line:
+                        return line.split(":")[1].strip()
+        except Exception:
+            pass
+        import platform
+        return platform.processor() or "N/A"
+
+    @staticmethod
+    def _get_ips():
+        result = []
+        try:
+            import psutil
+            for name, addrs in psutil.net_if_addrs().items():
+                if name == "lo":
+                    continue
+                for addr in addrs:
+                    if addr.family == 2:
+                        result.append((name, addr.address))
+        except Exception:
+            import socket
+            result.append(("IP", socket.gethostbyname(socket.gethostname())))
+        return result
+
+    @staticmethod
+    def _uptime():
+        try:
+            with open("/proc/uptime") as f:
+                secs = float(f.read().split()[0])
+            days = int(secs // 86400)
+            hours = int((secs % 86400) // 3600)
+            mins = int((secs % 3600) // 60)
+            parts = []
+            if days:
+                parts.append(f"{days}天")
+            parts.append(f"{hours}时{mins}分")
+            return " ".join(parts)
+        except Exception:
+            return None
+
+
+# ---------------------------------------------------------------------------
+# Bookmark Manager Widget
+# ---------------------------------------------------------------------------
+class BookmarkWidget(CompBase):
+    def __init__(self, data, parent=None):
+        super().__init__(data, parent)
+        self._bookmarks: list[dict] = []
+        self._load()
+        self._build_ui()
+
+    def _load(self):
+        try:
+            if self.data.cmd:
+                self._bookmarks = json.loads(self.data.cmd)
+        except Exception:
+            self._bookmarks = []
+
+    def _save(self):
+        self.data.cmd = json.dumps(self._bookmarks, ensure_ascii=False)
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self); lay.setContentsMargins(12, 10, 12, 10); lay.setSpacing(6)
+        hdr = QHBoxLayout()
+        title = QLabel("🔖 书签管理")
+        title.setStyleSheet(f"color:{C['text']};font-size:14px;font-weight:bold;background:transparent;")
+        hdr.addWidget(title); hdr.addStretch()
+        add_btn = QPushButton("＋"); add_btn.setCursor(Qt.PointingHandCursor)
+        add_btn.setStyleSheet(f"background:{C['blue']};color:{C['crust']};border:none;border-radius:8px;"
+                              f"font-size:14px;padding:4px 12px;font-weight:bold;")
+        add_btn.clicked.connect(self._add_bookmark)
+        hdr.addWidget(add_btn)
+        lay.addLayout(hdr)
+        sc = QScrollArea(); sc.setWidgetResizable(True)
+        sc.setStyleSheet(f"QScrollArea{{background:transparent;border:none;}}QScrollArea > QWidget{{background:transparent;}}{_scrollbar_style(6)}")
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._list_w = QWidget()
+        self._list_w.setStyleSheet("background:transparent;")
+        self._list_lay = QVBoxLayout(self._list_w); self._list_lay.setContentsMargins(0, 0, 0, 0)
+        self._list_lay.setSpacing(4); self._list_lay.addStretch()
+        sc.setWidget(self._list_w)
+        lay.addWidget(sc)
+        self._rebuild()
+
+    def _rebuild(self):
+        while self._list_lay.count() > 1:
+            item = self._list_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for i, bm in enumerate(self._bookmarks):
+            row = QFrame()
+            row.setStyleSheet(f"QFrame{{background:{_bg('surface0')};border-radius:6px;}}"
+                              f"QFrame:hover{{background:{_bg('surface1')};}}")
+            rl = QHBoxLayout(row); rl.setContentsMargins(8, 4, 4, 4); rl.setSpacing(6)
+            icon = QLabel(bm.get("icon", "🌐"))
+            icon.setStyleSheet(f"font-size:16px;background:transparent;")
+            rl.addWidget(icon)
+            name = QLabel(bm.get("name", ""))
+            name.setStyleSheet(f"color:{C['text']};font-size:11px;background:transparent;")
+            name.setCursor(Qt.PointingHandCursor)
+            name.mousePressEvent = lambda e, url=bm.get("url", ""): self._open(url)
+            rl.addWidget(name); rl.addStretch()
+            del_btn = QPushButton("✕"); del_btn.setFixedSize(20, 20); del_btn.setCursor(Qt.PointingHandCursor)
+            del_btn.setStyleSheet(f"background:transparent;color:{C['red']};border:none;font-size:12px;")
+            del_btn.clicked.connect(lambda _, idx=i: self._delete(idx))
+            rl.addWidget(del_btn)
+            self._list_lay.insertWidget(i, row)
+
+    def _add_bookmark(self):
+        ok, name = _input_dialog(self, "添加书签", "名称：")
+        if not ok or not name:
+            return
+        ok, url = _input_dialog(self, "添加书签", "网址：", "https://")
+        if not ok or not url:
+            return
+        self._bookmarks.append({"name": name, "url": url, "icon": "🌐"})
+        self._save(); self._rebuild()
+
+    def _delete(self, idx):
+        if 0 <= idx < len(self._bookmarks):
+            self._bookmarks.pop(idx)
+            self._save(); self._rebuild()
+
+    def _open(self, url):
+        if url:
+            try:
+                subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Calculator Widget
+# ---------------------------------------------------------------------------
+class CalcWidget(CompBase):
+    def __init__(self, data, parent=None):
+        super().__init__(data, parent)
+        self._expr = ""
+        self._result = ""
+        self._build_ui()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self); lay.setContentsMargins(12, 10, 12, 10); lay.setSpacing(6)
+        self._display = QLabel("0")
+        self._display.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._display.setStyleSheet(f"color:{C['text']};font-size:28px;font-weight:bold;"
+                                    f"font-family:'JetBrains Mono','Courier New',monospace;"
+                                    f"background:{_bg('surface0')};border-radius:8px;padding:12px 16px;"
+                                    f"min-height:40px;")
+        lay.addWidget(self._display)
+        self._expr_lbl = QLabel("")
+        self._expr_lbl.setAlignment(Qt.AlignRight)
+        self._expr_lbl.setStyleSheet(f"color:{C['subtext0']};font-size:11px;background:transparent;padding:0 16px;")
+        lay.addWidget(self._expr_lbl)
+        from PyQt5.QtWidgets import QGridLayout
+        grid = QGridLayout(); grid.setSpacing(6)
+        buttons = [
+            ("C", 0, 0, C['red']), ("(", 0, 1, C['surface1']), (")", 0, 2, C['surface1']), ("÷", 0, 3, C['peach']),
+            ("7", 1, 0, ""), ("8", 1, 1, ""), ("9", 1, 2, ""), ("×", 1, 3, C['peach']),
+            ("4", 2, 0, ""), ("5", 2, 1, ""), ("6", 2, 2, ""), ("−", 2, 3, C['peach']),
+            ("1", 3, 0, ""), ("2", 3, 1, ""), ("3", 3, 2, ""), ("+", 3, 3, C['peach']),
+            ("±", 4, 0, C['surface1']), ("0", 4, 1, ""), (".", 4, 2, ""), ("=", 4, 3, C['blue']),
+        ]
+        for text, r, c, color in buttons:
+            b = QPushButton(text); b.setFixedHeight(40); b.setCursor(Qt.PointingHandCursor)
+            bg = color or C['surface0']
+            fg = C['crust'] if color in (C['blue'], C['red'], C['peach']) else C['text']
+            b.setStyleSheet(f"""QPushButton {{background:{bg};color:{fg};border:none;
+                border-radius:8px;font-size:16px;font-weight:bold;}}
+                QPushButton:hover {{background:{C['surface2'] if not color else color};opacity:0.8;}}""")
+            b.clicked.connect(lambda _, t=text: self._on_btn(t))
+            grid.addWidget(b, r, c)
+        lay.addLayout(grid)
+
+    def _on_btn(self, text):
+        if text == "C":
+            self._expr = ""; self._result = ""
+            self._display.setText("0"); self._expr_lbl.setText("")
+        elif text == "=":
+            self._calc()
+        elif text == "±":
+            if self._expr and self._expr[0] == '-':
+                self._expr = self._expr[1:]
+            elif self._expr:
+                self._expr = '-' + self._expr
+            self._expr_lbl.setText(self._expr)
+        else:
+            op_map = {"÷": "/", "×": "*", "−": "-"}
+            self._expr += op_map.get(text, text)
+            self._expr_lbl.setText(self._expr)
+
+    def _calc(self):
+        try:
+            safe_expr = self._expr.replace("^", "**")
+            for ch in safe_expr:
+                if ch not in "0123456789.+-*/() ":
+                    self._display.setText("错误"); return
+            result = eval(safe_expr)
+            self._result = str(result)
+            if '.' in self._result:
+                self._result = self._result.rstrip('0').rstrip('.')
+            self._display.setText(self._result)
+            self._expr_lbl.setText(f"{self._expr} =")
+            self._expr = self._result
+        except Exception:
+            self._display.setText("错误")
+
+    def refresh_theme(self):
+        saved_expr = self._expr
+        saved_result = self._result
+        super().refresh_theme()
+        self._expr = saved_expr
+        self._result = saved_result
+        self._expr_lbl.setText(saved_expr)
+        if saved_result:
+            self._display.setText(saved_result)
+
+
+# ---------------------------------------------------------------------------
+# Trash / Recycle Bin Widget
+# ---------------------------------------------------------------------------
+class TrashWidget(CompBase):
+    def __init__(self, data, parent=None):
+        super().__init__(data, parent)
+        self._trash_dir = os.path.expanduser("~/.local/share/Trash")
+        self._count = 0
+        self._size = 0
+        self._build_ui()
+        self._timer = QTimer(self); self._timer.timeout.connect(self._refresh); self._timer.start(5000)
+        QTimer.singleShot(100, self._refresh)
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self); lay.setContentsMargins(16, 12, 16, 12); lay.setSpacing(6)
+        top = QHBoxLayout()
+        self._icon_lbl = QLabel("🗑️")
+        self._icon_lbl.setStyleSheet("font-size:32px;background:transparent;")
+        top.addWidget(self._icon_lbl)
+        info = QVBoxLayout(); info.setSpacing(2)
+        self._count_lbl = QLabel("0 个文件")
+        self._count_lbl.setStyleSheet(f"color:{C['text']};font-size:14px;font-weight:bold;background:transparent;")
+        self._size_lbl = QLabel("0 B")
+        self._size_lbl.setStyleSheet(f"color:{C['subtext0']};font-size:11px;background:transparent;")
+        info.addWidget(self._count_lbl); info.addWidget(self._size_lbl)
+        top.addLayout(info); top.addStretch()
+        lay.addLayout(top)
+        btns = QHBoxLayout(); btns.addStretch()
+        open_btn = QPushButton("打开回收站"); open_btn.setCursor(Qt.PointingHandCursor)
+        open_btn.setStyleSheet(f"background:{_bg('surface1')};color:{C['text']};border:none;"
+                               f"border-radius:8px;padding:6px 16px;font-size:13px;")
+        open_btn.clicked.connect(self._open_trash)
+        btns.addWidget(open_btn)
+        empty_btn = QPushButton("清空"); empty_btn.setCursor(Qt.PointingHandCursor)
+        empty_btn.setStyleSheet(f"background:{C['red']};color:{C['crust']};border:none;"
+                                f"border-radius:8px;padding:6px 16px;font-size:13px;font-weight:bold;")
+        empty_btn.clicked.connect(self._empty_trash)
+        btns.addWidget(empty_btn)
+        btns.addStretch()
+        lay.addLayout(btns); lay.addStretch()
+
+    def _refresh(self):
+        files_dir = os.path.join(self._trash_dir, "files")
+        if not os.path.isdir(files_dir):
+            self._count = 0; self._size = 0
+        else:
+            items = os.listdir(files_dir)
+            self._count = len(items)
+            total = 0
+            for item in items:
+                p = os.path.join(files_dir, item)
+                try:
+                    if os.path.isfile(p):
+                        total += os.path.getsize(p)
+                    elif os.path.isdir(p):
+                        for root, dirs, fs in os.walk(p):
+                            for f in fs:
+                                try:
+                                    total += os.path.getsize(os.path.join(root, f))
+                                except OSError:
+                                    pass
+                except OSError:
+                    pass
+            self._size = total
+        self._count_lbl.setText(f"{self._count} 个文件")
+        self._size_lbl.setText(self._fmt_size(self._size))
+
+    @staticmethod
+    def _fmt_size(b):
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if b < 1024:
+                return f"{b:.1f} {unit}"
+            b /= 1024
+        return f"{b:.1f} TB"
+
+    def _open_trash(self):
+        try:
+            subprocess.Popen(["xdg-open", f"trash:///"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    def _empty_trash(self):
+        if not _confirm_dialog(self, "清空回收站", f"确定要永久删除 {self._count} 个文件吗？\n此操作不可撤销！"):
+            return
+        try:
+            subprocess.run(["gio", "trash", "--empty"], timeout=30, capture_output=True)
+        except Exception:
+            files_dir = os.path.join(self._trash_dir, "files")
+            info_dir = os.path.join(self._trash_dir, "info")
+            for d in [files_dir, info_dir]:
+                if os.path.isdir(d):
+                    import shutil
+                    for item in os.listdir(d):
+                        p = os.path.join(d, item)
+                        try:
+                            if os.path.isdir(p):
+                                shutil.rmtree(p)
+                            else:
+                                os.remove(p)
+                        except Exception:
+                            pass
+            self._refresh()
+
+    def refresh_theme(self):
+        super().refresh_theme()
+        self._timer = QTimer(self); self._timer.timeout.connect(self._refresh); self._timer.start(5000)
+        QTimer.singleShot(100, self._refresh)
+
+
+# ---------------------------------------------------------------------------
+# RSS Reader Widget
+# ---------------------------------------------------------------------------
+class RSSWidget(CompBase):
+    def __init__(self, data, parent=None):
+        super().__init__(data, parent)
+        self._feeds: list[dict] = []
+        self._items: list[dict] = []
+        self._load_feeds()
+        self._build_ui()
+        QTimer.singleShot(500, self._fetch_all)
+
+    def _load_feeds(self):
+        try:
+            if self.data.cmd:
+                self._feeds = json.loads(self.data.cmd)
+        except Exception:
+            self._feeds = [{"name": "Hacker News", "url": "https://hnrss.org/frontpage?count=10"}]
+
+    def _save_feeds(self):
+        self.data.cmd = json.dumps(self._feeds, ensure_ascii=False)
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self); lay.setContentsMargins(12, 10, 12, 10); lay.setSpacing(6)
+        hdr = QHBoxLayout()
+        title = QLabel("📰 RSS 阅读器")
+        title.setStyleSheet(f"color:{C['text']};font-size:14px;font-weight:bold;background:transparent;")
+        hdr.addWidget(title); hdr.addStretch()
+        add_btn = QPushButton("＋"); add_btn.setCursor(Qt.PointingHandCursor)
+        add_btn.setStyleSheet(f"background:{C['blue']};color:{C['crust']};border:none;border-radius:8px;"
+                              f"font-size:14px;padding:4px 12px;font-weight:bold;")
+        add_btn.clicked.connect(self._add_feed)
+        hdr.addWidget(add_btn)
+        refresh_btn = QPushButton("↻"); refresh_btn.setCursor(Qt.PointingHandCursor)
+        refresh_btn.setStyleSheet(f"background:{_bg('surface1')};color:{C['text']};border:none;border-radius:8px;"
+                                  f"font-size:14px;padding:4px 12px;")
+        refresh_btn.clicked.connect(self._fetch_all)
+        hdr.addWidget(refresh_btn)
+        lay.addLayout(hdr)
+        self._status = QLabel("")
+        self._status.setStyleSheet(f"color:{C['subtext0']};font-size:10px;background:transparent;")
+        lay.addWidget(self._status)
+        sc = QScrollArea(); sc.setWidgetResizable(True)
+        sc.setStyleSheet(f"QScrollArea{{background:transparent;border:none;}}QScrollArea > QWidget{{background:transparent;}}{_scrollbar_style(6)}")
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._list_w = QWidget()
+        self._list_w.setStyleSheet("background:transparent;")
+        self._list_lay = QVBoxLayout(self._list_w); self._list_lay.setContentsMargins(0, 0, 0, 0)
+        self._list_lay.setSpacing(4); self._list_lay.addStretch()
+        sc.setWidget(self._list_w)
+        lay.addWidget(sc)
+
+    def _add_feed(self):
+        ok, url = _input_dialog(self, "添加 RSS 源", "RSS URL：", "https://")
+        if not ok or not url:
+            return
+        ok2, name = _input_dialog(self, "添加 RSS 源", "名称（可选）：")
+        self._feeds.append({"name": name or (url.split("/")[2] if len(url.split("/")) > 2 else "Feed"), "url": url})
+        self._save_feeds()
+        self._fetch_all()
+
+    def _fetch_all(self):
+        self._status.setText("加载中...")
+        self._items = []
+        t = threading.Thread(target=self._fetch_worker, daemon=True)
+        t.start()
+
+    def _fetch_worker(self):
+        items = []
+        for feed in self._feeds:
+            try:
+                req = urllib.request.Request(feed["url"], headers={"User-Agent": "FastPanel/1.0"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = resp.read().decode("utf-8", errors="replace")
+                items.extend(self._parse_rss(data, feed.get("name", "")))
+            except Exception:
+                pass
+        self._items = items[:30]
+        QTimer.singleShot(0, self._rebuild)
+
+    @staticmethod
+    def _parse_rss(xml_text, source=""):
+        items = []
+        import re
+        for m in re.finditer(r'<item>(.*?)</item>', xml_text, re.DOTALL):
+            block = m.group(1)
+            title_m = re.search(r'<title>(.*?)</title>', block, re.DOTALL)
+            link_m = re.search(r'<link>(.*?)</link>', block, re.DOTALL)
+            if title_m:
+                title = title_m.group(1).strip()
+                title = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', title)
+                link = link_m.group(1).strip() if link_m else ""
+                link = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', link)
+                items.append({"title": title, "link": link, "source": source})
+        return items
+
+    def _rebuild(self):
+        while self._list_lay.count() > 1:
+            item = self._list_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._status.setText(f"{len(self._items)} 条 · {len(self._feeds)} 个源")
+        for i, item in enumerate(self._items):
+            row = QFrame()
+            row.setStyleSheet(f"QFrame{{background:{_bg('surface0')};border-radius:6px;}}"
+                              f"QFrame:hover{{background:{_bg('surface1')};}}")
+            rl = QVBoxLayout(row); rl.setContentsMargins(8, 6, 8, 6); rl.setSpacing(2)
+            title = QLabel(item["title"])
+            title.setWordWrap(True); title.setCursor(Qt.PointingHandCursor)
+            title.setStyleSheet(f"color:{C['text']};font-size:11px;background:transparent;")
+            title.mousePressEvent = lambda e, url=item.get("link", ""): self._open(url)
+            rl.addWidget(title)
+            if item.get("source"):
+                src = QLabel(item["source"])
+                src.setStyleSheet(f"color:{C['overlay0']};font-size:9px;background:transparent;")
+                rl.addWidget(src)
+            self._list_lay.insertWidget(i, row)
+
+    def _open(self, url):
+        if url:
+            try:
+                subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+
+    def refresh_theme(self):
+        saved_items = list(self._items)
+        super().refresh_theme()
+        self._items = saved_items
+        if self._items:
+            self._rebuild()
+        else:
+            QTimer.singleShot(500, self._fetch_all)
+
+
 def create_widget(data: ComponentData, parent=None) -> CompBase:
     if data.comp_type == TYPE_CMD_WINDOW:
         return CmdWindowWidget(data, parent)
@@ -4261,6 +6955,32 @@ def create_widget(data: ComponentData, parent=None) -> CompBase:
         return TodoWidget(data, parent)
     if data.comp_type == TYPE_CLOCK:
         return ClockWidget(data, parent)
+    if data.comp_type == TYPE_MONITOR:
+        return MonitorWidget(data, parent)
+    if data.comp_type == TYPE_LAUNCHER:
+        return LauncherWidget(data, parent)
+    if data.comp_type == TYPE_NOTE:
+        return NoteWidget(data, parent)
+    if data.comp_type == TYPE_QUICKACTION:
+        return QuickActionWidget(data, parent)
+    if data.comp_type == TYPE_MEDIA:
+        return MediaWidget(data, parent)
+    if data.comp_type == TYPE_CLIPBOARD:
+        return ClipboardWidget(data, parent)
+    if data.comp_type == TYPE_TIMER:
+        return TimerWidget(data, parent)
+    if data.comp_type == TYPE_GALLERY:
+        return GalleryWidget(data, parent)
+    if data.comp_type == TYPE_SYSINFO:
+        return SysInfoWidget(data, parent)
+    if data.comp_type == TYPE_BOOKMARK:
+        return BookmarkWidget(data, parent)
+    if data.comp_type == TYPE_CALC:
+        return CalcWidget(data, parent)
+    if data.comp_type == TYPE_TRASH:
+        return TrashWidget(data, parent)
+    if data.comp_type == TYPE_RSS:
+        return RSSWidget(data, parent)
     return CmdWidget(data, parent)
 
 
@@ -4318,6 +7038,19 @@ class GridPanel(QWidget):
         self._multi_drag_offsets = []
         self._bg_pixmap = None
         self._bg_opacity = 30
+        self._bg_slideshow_dir = ""
+        self._bg_slideshow_interval = 300
+        self._bg_slideshow_files = []
+        self._bg_slideshow_idx = 0
+        self._bg_slideshow_timer = QTimer(self)
+        self._bg_slideshow_timer.timeout.connect(self._next_slideshow)
+        self._bg_gradient = ""
+        self._bg_mode = _settings.get("bg_mode", "tile")
+        self._bg_per_monitor = {}
+        per_mon = _settings.get("bg_per_monitor", {})
+        for name, path in per_mon.items():
+            if path and os.path.isfile(path):
+                self._bg_per_monitor[name] = QPixmap(path)
         self._show_grid = _settings.get("show_grid", True)
         self._safe_margin_top = 0
         self._safe_margin_bottom = 0
@@ -4329,7 +7062,13 @@ class GridPanel(QWidget):
         bg = _settings.get("bg_image", "")
         if bg and os.path.isfile(bg):
             self._bg_pixmap = QPixmap(bg)
-            self._bg_opacity = _settings.get("bg_opacity", 30)
+        self._bg_opacity = _settings.get("bg_opacity", 30)
+        grad = _settings.get("bg_gradient", "")
+        if grad:
+            self._bg_gradient = grad
+        ss_dir = _settings.get("bg_slideshow_dir", "")
+        if ss_dir:
+            self.set_bg_slideshow(ss_dir, _settings.get("bg_slideshow_interval", 300))
 
     def set_bg_image(self, path, opacity=30):
         if path and os.path.isfile(path):
@@ -4338,9 +7077,49 @@ class GridPanel(QWidget):
             self._bg_pixmap = None
         self._bg_opacity = opacity
 
+    def set_bg_gradient(self, gradient_str):
+        self._bg_gradient = gradient_str
+        self.update()
+
+    def set_bg_mode(self, mode):
+        self._bg_mode = mode
+        self.update()
+
+    def set_per_monitor_bg(self, mapping):
+        self._bg_per_monitor = {}
+        for name, path in mapping.items():
+            if path and os.path.isfile(path):
+                self._bg_per_monitor[name] = QPixmap(path)
+        self.update()
+
+    def set_bg_slideshow(self, directory, interval=300):
+        self._bg_slideshow_dir = directory
+        self._bg_slideshow_interval = max(10, interval)
+        self._bg_slideshow_timer.stop()
+        self._bg_slideshow_files = []
+        self._bg_slideshow_idx = 0
+        if directory and os.path.isdir(directory):
+            exts = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
+            self._bg_slideshow_files = sorted(
+                [os.path.join(directory, f) for f in os.listdir(directory)
+                 if os.path.splitext(f)[1].lower() in exts])
+            if self._bg_slideshow_files:
+                self._bg_pixmap = QPixmap(self._bg_slideshow_files[0])
+                self._bg_slideshow_timer.start(interval * 1000)
+                self.update()
+
+    def _next_slideshow(self):
+        if not self._bg_slideshow_files:
+            return
+        self._bg_slideshow_idx = (self._bg_slideshow_idx + 1) % len(self._bg_slideshow_files)
+        path = self._bg_slideshow_files[self._bg_slideshow_idx]
+        if os.path.isfile(path):
+            self._bg_pixmap = QPixmap(path)
+            self.update()
+
     def set_safe_margins(self, top, bottom):
-        self._safe_margin_top = top
-        self._safe_margin_bottom = bottom
+        self._safe_margin_top = ((top + GRID_SIZE - 1) // GRID_SIZE) * GRID_SIZE
+        self._safe_margin_bottom = ((bottom + GRID_SIZE - 1) // GRID_SIZE) * GRID_SIZE
 
     def set_show_grid(self, show):
         self._show_grid = show
@@ -4353,19 +7132,73 @@ class GridPanel(QWidget):
     def paintEvent(self, e):
         p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(e.rect(), QColor(C["crust"]))
+        if self._bg_gradient:
+            from PyQt5.QtGui import QLinearGradient
+            parts = self._bg_gradient.split(",")
+            if len(parts) >= 2:
+                grad = QLinearGradient(0, 0, self.width(), self.height())
+                for i, color_str in enumerate(parts):
+                    stop = i / max(len(parts) - 1, 1)
+                    grad.setColorAt(stop, QColor(color_str.strip()))
+                p.setOpacity(self._bg_opacity / 100.0)
+                p.fillRect(e.rect(), grad)
+                p.setOpacity(1.0)
         if self._bg_pixmap and not self._bg_pixmap.isNull():
             p.setOpacity(self._bg_opacity / 100.0)
-            scaled = self._bg_pixmap.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-            x = (self.width() - scaled.width()) // 2
-            y = (self.height() - scaled.height()) // 2
-            p.drawPixmap(x, y, scaled)
+            if self._bg_mode == "clone":
+                screens = QApplication.screens()
+                win = self.window()
+                win_pos = win.pos() if win else QPoint(0, 0)
+                for s in screens:
+                    sg = s.geometry()
+                    local_rect = QRect(sg.x() - win_pos.x(), sg.y() - win_pos.y(), sg.width(), sg.height())
+                    scaled = self._bg_pixmap.scaled(local_rect.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                    ox = local_rect.x() + (local_rect.width() - scaled.width()) // 2
+                    oy = local_rect.y() + (local_rect.height() - scaled.height()) // 2
+                    p.setClipRect(local_rect)
+                    p.drawPixmap(ox, oy, scaled)
+                p.setClipping(False)
+            elif self._bg_mode == "per_monitor" and self._bg_per_monitor:
+                screens = QApplication.screens()
+                win = self.window()
+                win_pos = win.pos() if win else QPoint(0, 0)
+                for s in screens:
+                    sg = s.geometry()
+                    local_rect = QRect(sg.x() - win_pos.x(), sg.y() - win_pos.y(), sg.width(), sg.height())
+                    pm = self._bg_per_monitor.get(s.name())
+                    if pm is None:
+                        pm = self._bg_pixmap
+                    if pm and not pm.isNull():
+                        scaled = pm.scaled(local_rect.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                        ox = local_rect.x() + (local_rect.width() - scaled.width()) // 2
+                        oy = local_rect.y() + (local_rect.height() - scaled.height()) // 2
+                        p.setClipRect(local_rect)
+                        p.drawPixmap(ox, oy, scaled)
+                p.setClipping(False)
+            else:
+                scaled = self._bg_pixmap.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                x = (self.width() - scaled.width()) // 2
+                y = (self.height() - scaled.height()) // 2
+                p.drawPixmap(x, y, scaled)
             p.setOpacity(1.0)
+        safe_top = self._safe_margin_top
+        safe_bot = self._safe_margin_bottom
         if self._show_grid:
-            dc = QColor(C["overlay0"]); dc.setAlpha(100); p.setPen(Qt.NoPen); p.setBrush(dc)
-            r = e.rect(); x0 = (r.left()//GRID_SIZE)*GRID_SIZE; y0 = (r.top()//GRID_SIZE)*GRID_SIZE
+            dc = QColor(C["overlay0"]); dc.setAlpha(80); p.setPen(Qt.NoPen); p.setBrush(dc)
+            grid_top = ((safe_top + GRID_SIZE - 1) // GRID_SIZE) * GRID_SIZE
+            grid_bottom = ((self.height() - safe_bot) // GRID_SIZE) * GRID_SIZE
+            r = e.rect(); x0 = (r.left()//GRID_SIZE)*GRID_SIZE
             for x in range(x0, r.right()+1, GRID_SIZE):
-                for y in range(y0, r.bottom()+1, GRID_SIZE):
-                    p.drawEllipse(x-1, y-1, 3, 3)
+                for y in range(grid_top, min(r.bottom()+1, grid_bottom + 1), GRID_SIZE):
+                    p.drawEllipse(x-1, y-1, 2, 2)
+        if safe_top > 0 or safe_bot > 0:
+            boundary_color = QColor(C['surface1']); boundary_color.setAlpha(60)
+            pen = QPen(boundary_color, 1, Qt.DashLine)
+            p.setPen(pen)
+            if safe_top > 0:
+                p.drawLine(0, safe_top, self.width(), safe_top)
+            if safe_bot > 0:
+                p.drawLine(0, self.height() - safe_bot, self.width(), self.height() - safe_bot)
         p.end()
 
     def _sel_bounding(self):
@@ -4479,6 +7312,9 @@ class GridPanel(QWidget):
         return getattr(w.data, '_group_id', None)
 
     def recalc_size(self, vw, vh):
+        if _DESKTOP_MODE:
+            self.setFixedSize(vw, vh)
+            return
         mb = vh
         for c in self._components:
             b = c.data.y + c.data.h + PANEL_PADDING
@@ -4494,16 +7330,65 @@ class GridPanel(QWidget):
         w.show(); self._components.append(w); self.data_changed.emit()
         return w
 
+    def _show_toast(self, text, duration=2500):
+        toast = QLabel(text, self)
+        toast.setAlignment(Qt.AlignCenter)
+        toast.setStyleSheet(f"""
+            QLabel {{
+                background: {C['red']}; color: {C['crust']};
+                font-size: 16px; font-weight: bold;
+                padding: 16px 32px; border-radius: 10px;
+            }}
+        """)
+        toast.adjustSize()
+        cursor_pos = self.mapFromGlobal(QApplication.desktop().cursor().pos())
+        screen = QApplication.screenAt(QApplication.desktop().cursor().pos())
+        if screen:
+            sg = screen.geometry()
+            local_center_x = self.mapFromGlobal(QPoint(sg.center().x(), sg.y())).x()
+            local_top_y = self.mapFromGlobal(QPoint(0, sg.y())).y()
+            toast.move(local_center_x - toast.width() // 2, local_top_y + self._safe_margin_top + 40)
+        else:
+            toast.move((self.width() - toast.width()) // 2, self._safe_margin_top + 40)
+        toast.show()
+        toast.raise_()
+        shadow = QGraphicsDropShadowEffect(toast)
+        shadow.setBlurRadius(20); shadow.setOffset(0, 4); shadow.setColor(QColor(0, 0, 0, 120))
+        toast.setGraphicsEffect(shadow)
+        QTimer.singleShot(duration, toast.deleteLater)
+
     def _child_moved(self):
         mover = self.sender()
         if mover:
+            mover_origin = getattr(mover, '_drag_origin', None)
+            snapshot = [(w, w.data.x, w.data.y) for w in self._components if w is not mover]
             self._resolve_overlaps(mover)
+            if self._layout_overflow():
+                for w, ox, oy in snapshot:
+                    w.move(ox, oy)
+                    w.data.x, w.data.y = ox, oy
+                if mover_origin:
+                    mover.move(mover_origin)
+                    mover.data.x, mover.data.y = mover_origin.x(), mover_origin.y()
+                self._show_toast("⚠ 布局空间不足，组件已回到原位")
         par = self.parent()
         if par:
             vp = par.viewport() if hasattr(par, 'viewport') else par
             self.recalc_size(vp.width(), vp.height())
         self._update_overlay()
         self.data_changed.emit()
+
+    def _layout_overflow(self):
+        if not _DESKTOP_MODE:
+            return False
+        safe_bot = self._safe_margin_bottom
+        max_bottom = self.height() - safe_bot
+        for w in self._components:
+            if w.data.y + w.data.h > max_bottom:
+                return True
+            if w.data.x + w.data.w > self.width():
+                return True
+        return False
 
     def _resolve_overlaps(self, mover):
         mover_gid = getattr(mover.data, '_group_id', None)
@@ -4536,7 +7421,11 @@ class GridPanel(QWidget):
 
     def _remove(self, w):
         if _confirm_dialog(self, "确认删除", f"确定删除组件「{w.data.name}」？"):
-            self._components.remove(w); w.deleteLater(); self.data_changed.emit()
+            self._components.remove(w)
+            w.setParent(None)
+            w.deleteLater()
+            self.update()
+            self.data_changed.emit()
 
     def _edit(self, w):
         dlg = EditDialog(w.data, self)
@@ -4984,6 +7873,32 @@ def _build_comp_dialog(dialog, heading_text, ok_text, data=None):
 
     dialog._clock_sub_combo.currentIndexChanged.connect(_on_clock_sub_changed)
 
+    # --- Monitor fields ---
+    dialog._monitor_sub_combo = QComboBox()
+    for k, v in MONITOR_SUB_LABELS.items():
+        dialog._monitor_sub_combo.addItem(v, k)
+    form.addRow("监控类型", dialog._monitor_sub_combo)
+
+    if data and data.comp_type == TYPE_MONITOR:
+        msub = data.cmd.strip() if data.cmd else MONITOR_SUB_ALL
+        idx = list(MONITOR_SUB_LABELS.keys()).index(msub) if msub in MONITOR_SUB_LABELS else list(MONITOR_SUB_LABELS.keys()).index(MONITOR_SUB_ALL)
+        dialog._monitor_sub_combo.setCurrentIndex(idx)
+
+    # --- Launcher fields ---
+    dialog._launcher_hint = QLabel("自动扫描系统已安装应用，提供搜索和快速启动")
+    dialog._launcher_hint.setStyleSheet(f"color:{C['overlay0']}; font-size:12px;")
+    form.addRow("", dialog._launcher_hint)
+
+    # --- Note fields ---
+    dialog._note_hint = QLabel("桌面便签，支持多种颜色，文字自动保存")
+    dialog._note_hint.setStyleSheet(f"color:{C['overlay0']}; font-size:12px;")
+    form.addRow("", dialog._note_hint)
+
+    # --- QuickAction fields ---
+    dialog._quickaction_hint = QLabel("系统快捷操作：锁屏、关机、重启、音量控制等")
+    dialog._quickaction_hint.setStyleSheet(f"color:{C['overlay0']}; font-size:12px;")
+    form.addRow("", dialog._quickaction_hint)
+
     if data and data.comp_type == TYPE_CLOCK:
         parts = data.cmd.split("|", 1)
         sub = parts[0] if parts else CLOCK_SUB_CLOCK
@@ -5036,9 +7951,13 @@ def _build_comp_dialog(dialog, heading_text, ok_text, data=None):
     dialog._clock_fields = [_lbl(dialog._clock_sub_combo), dialog._clock_sub_combo]
     dialog._clock_world_fields = [_lbl(dialog._clock_world_combo), dialog._clock_world_combo]
     dialog._clock_fmt_fields = [_lbl(dialog._clock_date_fmt), dialog._clock_date_fmt]
+    dialog._monitor_fields = [_lbl(dialog._monitor_sub_combo), dialog._monitor_sub_combo]
+    dialog._launcher_fields = [_lbl(dialog._launcher_hint), dialog._launcher_hint]
+    dialog._note_fields = [_lbl(dialog._note_hint), dialog._note_hint]
+    dialog._quickaction_fields = [_lbl(dialog._quickaction_hint), dialog._quickaction_hint]
 
     dialog._name_fields = [_lbl(dialog.name_edit), dialog.name_edit]
-    _NO_NAME_TYPES = {TYPE_CALENDAR, TYPE_WEATHER, TYPE_DOCK, TYPE_TODO, TYPE_CLOCK}
+    _NO_NAME_TYPES = {TYPE_CALENDAR, TYPE_WEATHER, TYPE_DOCK, TYPE_TODO, TYPE_CLOCK, TYPE_MONITOR, TYPE_LAUNCHER, TYPE_QUICKACTION}
 
     def on_type_changed(_=0):
         t = dialog.cat.currentData()
@@ -5066,6 +7985,14 @@ def _build_comp_dialog(dialog, heading_text, ok_text, data=None):
             if w: w.setVisible(t == TYPE_CLOCK and dialog._clock_sub_combo.currentData() == CLOCK_SUB_WORLD)
         for w in dialog._clock_fmt_fields:
             if w: w.setVisible(t == TYPE_CLOCK and dialog._clock_sub_combo.currentData() == CLOCK_SUB_CLOCK)
+        for w in dialog._monitor_fields:
+            if w: w.setVisible(t == TYPE_MONITOR)
+        for w in dialog._launcher_fields:
+            if w: w.setVisible(t == TYPE_LAUNCHER)
+        for w in dialog._note_fields:
+            if w: w.setVisible(t == TYPE_NOTE)
+        for w in dialog._quickaction_fields:
+            if w: w.setVisible(t == TYPE_QUICKACTION)
         dialog._update_param_hints()
 
     dialog.cat.currentIndexChanged.connect(on_type_changed)
@@ -5085,7 +8012,7 @@ def _dlg_browse(dialog, edit, title, filt):
 
 def _dlg_validate(dialog):
     t = dialog.cat.currentData()
-    _no_name = {TYPE_CALENDAR, TYPE_WEATHER, TYPE_DOCK, TYPE_TODO, TYPE_CLOCK}
+    _no_name = {TYPE_CALENDAR, TYPE_WEATHER, TYPE_DOCK, TYPE_TODO, TYPE_CLOCK, TYPE_MONITOR, TYPE_LAUNCHER, TYPE_QUICKACTION}
     if t not in _no_name and not dialog.name_edit.text().strip():
         dialog.name_edit.setFocus(); return False
     if t == TYPE_CMD and not dialog.cmd_edit.text().strip():
@@ -5120,9 +8047,19 @@ def _dlg_get_data(dialog):
                 cmd = f"{clock_sub}|[]"
         else:
             cmd = clock_sub
+    if t == TYPE_MONITOR:
+        cmd = dialog._monitor_sub_combo.currentData()
+    if t == TYPE_NOTE:
+        existing = getattr(dialog, '_data', None)
+        if existing and existing.comp_type == TYPE_NOTE:
+            cmd = existing.cmd
+        else:
+            cmd = "0|"
     name = dialog.name_edit.text().strip()
     if not name:
-        _defaults = {TYPE_CALENDAR: "日历", TYPE_WEATHER: "天气", TYPE_DOCK: "Dock栏", TYPE_TODO: "待办", TYPE_CLOCK: "时钟"}
+        _defaults = {TYPE_CALENDAR: "日历", TYPE_WEATHER: "天气", TYPE_DOCK: "Dock栏", TYPE_TODO: "待办",
+                     TYPE_CLOCK: "时钟", TYPE_MONITOR: "系统监控", TYPE_LAUNCHER: "应用启动器",
+                     TYPE_NOTE: "便签", TYPE_QUICKACTION: "快捷操作"}
         name = _defaults.get(t, t)
     ri = dialog._refresh_spin.value() * 60 if t in (TYPE_CALENDAR, TYPE_WEATHER) else 300
     return ComponentData(
@@ -5374,6 +8311,101 @@ class ImageCropDialog(QDialog):
         return self._cropped_path
 
 
+_KEY_NAMES = {
+    Qt.Key_F1: "F1", Qt.Key_F2: "F2", Qt.Key_F3: "F3", Qt.Key_F4: "F4",
+    Qt.Key_F5: "F5", Qt.Key_F6: "F6", Qt.Key_F7: "F7", Qt.Key_F8: "F8",
+    Qt.Key_F9: "F9", Qt.Key_F10: "F10", Qt.Key_F11: "F11", Qt.Key_F12: "F12",
+    Qt.Key_Space: "space", Qt.Key_Return: "Return", Qt.Key_Enter: "Return",
+    Qt.Key_Escape: "Escape", Qt.Key_Tab: "Tab", Qt.Key_Backspace: "BackSpace",
+    Qt.Key_Delete: "Delete", Qt.Key_Up: "Up", Qt.Key_Down: "Down",
+    Qt.Key_Left: "Left", Qt.Key_Right: "Right", Qt.Key_Home: "Home",
+    Qt.Key_End: "End", Qt.Key_PageUp: "Prior", Qt.Key_PageDown: "Next",
+    Qt.Key_Comma: "comma", Qt.Key_Period: "period", Qt.Key_Slash: "slash",
+    Qt.Key_Semicolon: "semicolon", Qt.Key_Apostrophe: "apostrophe",
+    Qt.Key_BracketLeft: "bracketleft", Qt.Key_BracketRight: "bracketright",
+    Qt.Key_Minus: "minus", Qt.Key_Equal: "equal", Qt.Key_QuoteLeft: "grave",
+}
+_MOD_KEYS = {Qt.Key_Control, Qt.Key_Alt, Qt.Key_Shift, Qt.Key_Meta,
+             Qt.Key_Super_L, Qt.Key_Super_R, Qt.Key_AltGr}
+
+
+def _parse_key_event(e):
+    parts = []
+    mods = e.modifiers()
+    if mods & Qt.ControlModifier: parts.append("Ctrl")
+    if mods & Qt.AltModifier: parts.append("Alt")
+    if mods & Qt.ShiftModifier: parts.append("Shift")
+    if mods & Qt.MetaModifier: parts.append("Super")
+    key = e.key()
+    if key in _MOD_KEYS:
+        return None, "+".join(parts) + "+" if parts else ""
+    if key in _KEY_NAMES:
+        parts.append(_KEY_NAMES[key])
+    elif Qt.Key_A <= key <= Qt.Key_Z:
+        parts.append(chr(key).lower())
+    elif Qt.Key_0 <= key <= Qt.Key_9:
+        parts.append(chr(key))
+    else:
+        return None, ""
+    return "+".join(parts), "+".join(parts)
+
+
+class _HotkeyCaptureDlg(QDialog):
+    def __init__(self, current_val="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("设置快捷键")
+        self.setFixedSize(320, 160)
+        self.setStyleSheet(_dialog_style())
+        self._result = current_val
+        lay = QVBoxLayout(self); lay.setContentsMargins(24, 20, 24, 20); lay.setSpacing(12)
+        hint = QLabel("请按下快捷键组合…")
+        hint.setAlignment(Qt.AlignCenter)
+        hint.setStyleSheet(f"color: {C['subtext0']}; font-size: 13px;")
+        lay.addWidget(hint)
+        self._display = QLabel(current_val or "—")
+        self._display.setAlignment(Qt.AlignCenter)
+        self._display.setStyleSheet(f"""
+            color: {C['text']}; font-size: 18px; font-weight: bold;
+            background: {C['surface0']}; border: 2px solid {C['blue']};
+            border-radius: 8px; padding: 12px; min-height: 30px;
+        """)
+        lay.addWidget(self._display)
+        self._pending = ""
+
+    def keyPressEvent(self, e):
+        combo, display = _parse_key_event(e)
+        if combo:
+            self._result = combo
+            self._display.setText(combo)
+            self._display.setStyleSheet(f"""
+                color: {C['green']}; font-size: 18px; font-weight: bold;
+                background: {C['surface0']}; border: 2px solid {C['green']};
+                border-radius: 8px; padding: 12px; min-height: 30px;
+            """)
+            QTimer.singleShot(400, self.accept)
+        elif display:
+            self._display.setText(display)
+
+    def get_result(self):
+        return self._result
+
+
+class _HotkeyEdit(QLineEdit):
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setReadOnly(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setPlaceholderText("点击设置快捷键")
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            dlg = _HotkeyCaptureDlg(self.text(), self.window())
+            if dlg.exec_() == QDialog.Accepted:
+                self.setText(dlg.get_result())
+        else:
+            super().mousePressEvent(e)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -5400,10 +8432,54 @@ class SettingsDialog(QDialog):
         self._update_preview_colors(cur)
         form.addRow("预  览", self._preview_bar)
 
+        # --- Monitor mode ---
+        screens = QApplication.screens()
+        if len(screens) > 1:
+            self._monitor_mode_combo = QComboBox()
+            self._monitor_mode_combo.addItem("所有显示器共用一个面板", "single")
+            self._monitor_mode_combo.addItem("每个显示器独立面板", "per_monitor")
+            cur_mm = _settings.get("monitor_mode", "single")
+            for i in range(self._monitor_mode_combo.count()):
+                if self._monitor_mode_combo.itemData(i) == cur_mm:
+                    self._monitor_mode_combo.setCurrentIndex(i); break
+            form.addRow("显示器模式", self._monitor_mode_combo)
+
+        # --- Wallpaper mode selector (mutually exclusive) ---
+        _WP_MODES = [
+            ("theme", "随主题颜色"),
+            ("image", "壁纸（单图）"),
+            ("per_monitor", "每个显示器"),
+            ("gradient", "渐变色"),
+            ("slideshow", "壁纸轮播"),
+        ]
+        cur_wp = _settings.get("wp_mode", "")
+        if not cur_wp:
+            if _settings.get("bg_slideshow_dir", ""):
+                cur_wp = "slideshow"
+            elif _settings.get("bg_gradient", ""):
+                cur_wp = "gradient"
+            elif _settings.get("bg_per_monitor", {}):
+                cur_wp = "per_monitor"
+            elif _settings.get("bg_image", ""):
+                cur_wp = "image"
+            else:
+                cur_wp = "theme"
+
+        self._wp_mode_combo = QComboBox()
+        for mode_id, mode_label in _WP_MODES:
+            self._wp_mode_combo.addItem(mode_label, mode_id)
+        for i in range(self._wp_mode_combo.count()):
+            if self._wp_mode_combo.itemData(i) == cur_wp:
+                self._wp_mode_combo.setCurrentIndex(i); break
+        form.addRow("壁纸模式", self._wp_mode_combo)
+
+        # -- Image mode settings --
+        self._wp_image_w = QWidget()
+        _img_lay = QVBoxLayout(self._wp_image_w); _img_lay.setContentsMargins(0, 0, 0, 0); _img_lay.setSpacing(6)
         bg_w = QWidget()
         bg_lay = QHBoxLayout(bg_w); bg_lay.setContentsMargins(0, 0, 0, 0); bg_lay.setSpacing(6)
         self.bg_edit = QLineEdit(_settings.get("bg_image", ""))
-        self.bg_edit.setPlaceholderText("背景图片路径（可选）")
+        self.bg_edit.setPlaceholderText("背景图片路径")
         bg_lay.addWidget(self.bg_edit)
         bb = QPushButton("…"); bb.setFixedWidth(36)
         bb.setStyleSheet(f"background:{C['surface1']}; color:{C['text']}; border:none; border-radius:6px;")
@@ -5413,8 +8489,22 @@ class SettingsDialog(QDialog):
         clr.setStyleSheet(f"background:{C['surface1']}; color:{C['red']}; border:none; border-radius:6px;")
         clr.clicked.connect(lambda: self.bg_edit.clear())
         bg_lay.addWidget(clr)
-        form.addRow("背  景", bg_w)
+        _img_lay.addWidget(bg_w)
+        _img_mode_w = QWidget()
+        _img_mode_lay = QHBoxLayout(_img_mode_w); _img_mode_lay.setContentsMargins(0, 0, 0, 0); _img_mode_lay.setSpacing(6)
+        _img_mode_lay.addWidget(QLabel("显示方式"))
+        self._bg_mode_combo = QComboBox()
+        for mode_id, mode_label in [("tile", "平铺"), ("clone", "复制")]:
+            self._bg_mode_combo.addItem(mode_label, mode_id)
+        cur_mode = _settings.get("bg_mode", "tile")
+        for i in range(self._bg_mode_combo.count()):
+            if self._bg_mode_combo.itemData(i) == cur_mode:
+                self._bg_mode_combo.setCurrentIndex(i); break
+        _img_mode_lay.addWidget(self._bg_mode_combo)
+        _img_lay.addWidget(_img_mode_w)
+        form.addRow("", self._wp_image_w)
 
+        # -- Opacity (shared for image/per_monitor/slideshow) --
         from PyQt5.QtWidgets import QSlider
         self.opacity_slider = QSlider(Qt.Horizontal)
         self.opacity_slider.setRange(10, 100)
@@ -5422,10 +8512,156 @@ class SettingsDialog(QDialog):
         self._opa_label = QLabel(f"{self.opacity_slider.value()}%")
         self._opa_label.setFixedWidth(36)
         self.opacity_slider.valueChanged.connect(lambda v: self._opa_label.setText(f"{v}%"))
-        opa_w = QWidget()
-        opa_lay = QHBoxLayout(opa_w); opa_lay.setContentsMargins(0, 0, 0, 0); opa_lay.setSpacing(6)
+        self._wp_opa_w = QWidget()
+        opa_lay = QHBoxLayout(self._wp_opa_w); opa_lay.setContentsMargins(0, 0, 0, 0); opa_lay.setSpacing(6)
         opa_lay.addWidget(self.opacity_slider); opa_lay.addWidget(self._opa_label)
-        form.addRow("透明度", opa_w)
+        form.addRow("背景透明度", self._wp_opa_w)
+
+        # -- Component opacity --
+        self._comp_opa_slider = QSlider(Qt.Horizontal)
+        self._comp_opa_slider.setRange(20, 100)
+        self._comp_opa_slider.setValue(_settings.get("comp_opacity", 90))
+        self._comp_opa_label = QLabel(f"{self._comp_opa_slider.value()}%")
+        self._comp_opa_label.setFixedWidth(36)
+        self._comp_opa_slider.valueChanged.connect(lambda v: self._comp_opa_label.setText(f"{v}%"))
+        comp_opa_w = QWidget()
+        comp_opa_lay = QHBoxLayout(comp_opa_w); comp_opa_lay.setContentsMargins(0, 0, 0, 0); comp_opa_lay.setSpacing(6)
+        comp_opa_lay.addWidget(self._comp_opa_slider); comp_opa_lay.addWidget(self._comp_opa_label)
+        form.addRow("组件透明度", comp_opa_w)
+
+        # -- Per monitor settings --
+        self._per_monitor_container = QWidget()
+        self._per_monitor_lay = QVBoxLayout(self._per_monitor_container)
+        self._per_monitor_lay.setContentsMargins(0, 0, 0, 0); self._per_monitor_lay.setSpacing(6)
+        self._per_monitor_edits = {}
+        screens = QApplication.screens()
+        saved_per_mon = _settings.get("bg_per_monitor", {})
+        for s in screens:
+            row_w = QWidget()
+            row_l = QHBoxLayout(row_w); row_l.setContentsMargins(0, 0, 0, 0); row_l.setSpacing(4)
+            lbl = QLabel(f"{s.name()} ({s.geometry().width()}×{s.geometry().height()})")
+            lbl.setFixedWidth(160)
+            lbl.setStyleSheet(f"color:{C['subtext0']}; font-size:11px;")
+            row_l.addWidget(lbl)
+            edit = QLineEdit(saved_per_mon.get(s.name(), ""))
+            edit.setPlaceholderText("壁纸路径")
+            row_l.addWidget(edit)
+            browse_btn = QPushButton("…"); browse_btn.setFixedWidth(28)
+            browse_btn.setStyleSheet(f"background:{C['surface1']}; color:{C['text']}; border:none; border-radius:6px;")
+            browse_btn.clicked.connect(lambda _, e=edit: self._browse_per_monitor(e))
+            row_l.addWidget(browse_btn)
+            self._per_monitor_lay.addWidget(row_w)
+            self._per_monitor_edits[s.name()] = edit
+        form.addRow("", self._per_monitor_container)
+
+        # -- Gradient settings --
+        self._wp_gradient_w = QWidget()
+        _grad_lay = QVBoxLayout(self._wp_gradient_w); _grad_lay.setContentsMargins(0, 0, 0, 0); _grad_lay.setSpacing(6)
+        self.gradient_edit = QLineEdit(_settings.get("bg_gradient", ""))
+        self.gradient_edit.setPlaceholderText("渐变色，如: #1a1b26,#24283b,#414868")
+        _grad_lay.addWidget(self.gradient_edit)
+        _GRADIENT_PRESETS = [
+            ("深空", "#0f0c29,#302b63,#24243e"),
+            ("日落", "#ee9ca7,#ffdde1"),
+            ("海洋", "#2193b0,#6dd5ed"),
+            ("森林", "#134e5e,#71b280"),
+            ("极光", "#00c9ff,#92fe9d"),
+            ("暗夜", "#0f2027,#203a43,#2c5364"),
+            ("火焰", "#f12711,#f5af19"),
+        ]
+        grad_preset_w = QWidget()
+        grad_preset_lay = QHBoxLayout(grad_preset_w); grad_preset_lay.setContentsMargins(0, 0, 0, 0); grad_preset_lay.setSpacing(4)
+        for name, val in _GRADIENT_PRESETS:
+            pb = QPushButton(name); pb.setFixedHeight(24); pb.setCursor(Qt.PointingHandCursor)
+            colors = val.split(",")
+            if len(colors) >= 2:
+                pb.setStyleSheet(f"""
+                    QPushButton {{
+                        background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 {colors[0]},stop:1 {colors[-1]});
+                        color: white; border: none; border-radius: 4px; font-size: 10px; padding: 2px 6px;
+                    }}
+                    QPushButton:hover {{ border: 1px solid white; }}
+                """)
+            pb.clicked.connect(lambda _, v=val: self.gradient_edit.setText(v))
+            grad_preset_lay.addWidget(pb)
+        grad_preset_lay.addStretch()
+        _grad_lay.addWidget(grad_preset_w)
+        form.addRow("", self._wp_gradient_w)
+
+        # -- Slideshow settings --
+        self._wp_slideshow_w = QWidget()
+        _ss_lay = QVBoxLayout(self._wp_slideshow_w); _ss_lay.setContentsMargins(0, 0, 0, 0); _ss_lay.setSpacing(6)
+        ss_row = QWidget()
+        ss_hlay = QHBoxLayout(ss_row); ss_hlay.setContentsMargins(0, 0, 0, 0); ss_hlay.setSpacing(6)
+        self.slideshow_dir = QLineEdit(_settings.get("bg_slideshow_dir", ""))
+        self.slideshow_dir.setPlaceholderText("壁纸目录")
+        ss_hlay.addWidget(self.slideshow_dir)
+        ssb = QPushButton("…"); ssb.setFixedWidth(36)
+        ssb.setStyleSheet(f"background:{C['surface1']}; color:{C['text']}; border:none; border-radius:6px;")
+        ssb.clicked.connect(self._browse_slideshow)
+        ss_hlay.addWidget(ssb)
+        _ss_lay.addWidget(ss_row)
+        int_row = QWidget()
+        int_hlay = QHBoxLayout(int_row); int_hlay.setContentsMargins(0, 0, 0, 0); int_hlay.setSpacing(6)
+        int_hlay.addWidget(QLabel("切换间隔"))
+        self.slideshow_interval = QSpinBox()
+        self.slideshow_interval.setRange(10, 3600)
+        self.slideshow_interval.setSuffix(" 秒")
+        self.slideshow_interval.setValue(_settings.get("bg_slideshow_interval", 300))
+        int_hlay.addWidget(self.slideshow_interval)
+        _ss_lay.addWidget(int_row)
+        form.addRow("", self._wp_slideshow_w)
+
+        # -- Mode switch handler --
+        def _on_wp_mode_change(idx):
+            mode = self._wp_mode_combo.itemData(idx)
+            self._wp_image_w.setVisible(mode == "image")
+            self._wp_opa_w.setVisible(mode in ("image", "per_monitor", "slideshow"))
+            self._per_monitor_container.setVisible(mode == "per_monitor")
+            self._wp_gradient_w.setVisible(mode == "gradient")
+            self._wp_slideshow_w.setVisible(mode == "slideshow")
+        self._wp_mode_combo.currentIndexChanged.connect(_on_wp_mode_change)
+        _on_wp_mode_change(self._wp_mode_combo.currentIndex())
+
+        if _DESKTOP_MODE:
+            sep = QFrame(); sep.setFrameShape(QFrame.HLine)
+            sep.setStyleSheet(f"color: {C['surface1']};")
+            form.addRow(sep)
+            hotkeys = _settings.get("hotkeys", {})
+            self._autostart_cb = QCheckBox("开机自动启动 FastPanel（桌面模式）")
+            self._autostart_cb.setChecked(_is_autostart_enabled())
+            form.addRow("自启动", self._autostart_cb)
+
+            sep2 = QFrame(); sep2.setFrameShape(QFrame.HLine)
+            sep2.setStyleSheet(f"color: {C['surface1']};")
+            form.addRow(sep2)
+            hk_label = QLabel("快捷键  （点击输入框设置，×按钮清除）")
+            hk_label.setStyleSheet(f"color: {C['subtext0']}; font-size: 11px; padding-top: 4px;")
+            form.addRow("", hk_label)
+            _hk_defs = [
+                ("显示/隐藏", "toggle_visibility", "_hk_toggle"),
+                ("新建组件", "add_component", "_hk_add"),
+                ("锁定切换", "toggle_lock", "_hk_lock"),
+                ("打开设置", "open_settings", "_hk_settings"),
+                ("剪贴板弹出", "clipboard_popup", "_hk_clipboard"),
+            ]
+            for label_text, key, attr in _hk_defs:
+                hk_edit = _HotkeyEdit(hotkeys.get(key, ""))
+                setattr(self, attr, hk_edit)
+                row = QHBoxLayout(); row.setSpacing(4)
+                row.addWidget(hk_edit, 1)
+                clr_btn = QPushButton("×")
+                clr_btn.setFixedSize(28, 28)
+                clr_btn.setCursor(Qt.PointingHandCursor)
+                clr_btn.setStyleSheet(f"""
+                    QPushButton {{ background: {C['surface1']}; color: {C['red']};
+                        border: none; border-radius: 14px; font-size: 16px; font-weight: bold; }}
+                    QPushButton:hover {{ background: {C['red']}; color: {C['crust']}; }}
+                """)
+                clr_btn.clicked.connect(lambda _, e=hk_edit: e.setText(""))
+                row.addWidget(clr_btn)
+                w = QWidget(); w.setLayout(row)
+                form.addRow(label_text, w)
 
         lay.addLayout(form); lay.addStretch()
         btns = QHBoxLayout(); btns.addStretch()
@@ -5457,13 +8693,70 @@ class SettingsDialog(QDialog):
             else:
                 self.bg_edit.setText(f)
 
+    def _browse_slideshow(self):
+        d = QFileDialog.getExistingDirectory(self, "选择壁纸目录", os.path.expanduser("~"))
+        if d:
+            self.slideshow_dir.setText(d)
+
+    def _browse_per_monitor(self, edit):
+        f, _ = QFileDialog.getOpenFileName(self, "选择壁纸", "", "图片 (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if f:
+            edit.setText(f)
+
+    def accept(self):
+        if _DESKTOP_MODE and hasattr(self, '_hk_toggle'):
+            hk_edits = {
+                "显示/隐藏": self._hk_toggle, "新建组件": self._hk_add,
+                "锁定切换": self._hk_lock, "打开设置": self._hk_settings,
+                "剪贴板弹出": self._hk_clipboard,
+            }
+            used = {}
+            for name, edit in hk_edits.items():
+                key = edit.text().strip().lower()
+                if key:
+                    if key in used:
+                        _confirm_dialog(self, "快捷键冲突",
+                                        f"「{name}」与「{used[key]}」使用了相同的快捷键：{edit.text().strip()}\n请修改后重试。")
+                        edit.setFocus()
+                        return
+                    used[key] = name
+        super().accept()
+
     def get_settings(self):
-        return {
+        bg_mode = self._bg_mode_combo.itemData(self._bg_mode_combo.currentIndex())
+        per_mon = {}
+        for name, edit in self._per_monitor_edits.items():
+            val = edit.text().strip()
+            if val:
+                per_mon[name] = val
+        wp_mode = self._wp_mode_combo.itemData(self._wp_mode_combo.currentIndex())
+        if hasattr(self, '_monitor_mode_combo'):
+            _settings["monitor_mode"] = self._monitor_mode_combo.itemData(self._monitor_mode_combo.currentIndex())
+            _settings["_monitor_mode_chosen"] = True
+        s = {
             "theme": self.theme_combo.currentText(),
-            "bg_image": self.bg_edit.text().strip(),
+            "wp_mode": wp_mode,
+            "bg_image": self.bg_edit.text().strip() if wp_mode == "image" else "",
             "bg_opacity": self.opacity_slider.value(),
+            "comp_opacity": self._comp_opa_slider.value(),
+            "bg_gradient": self.gradient_edit.text().strip() if wp_mode == "gradient" else "",
+            "bg_slideshow_dir": self.slideshow_dir.text().strip() if wp_mode == "slideshow" else "",
+            "bg_slideshow_interval": self.slideshow_interval.value(),
             "show_grid": _settings.get("show_grid", True),
+            "bg_mode": bg_mode if wp_mode == "image" else "tile",
+            "bg_per_monitor": per_mon if wp_mode == "per_monitor" else {},
         }
+        if _DESKTOP_MODE and hasattr(self, '_hk_toggle'):
+            s["hotkeys"] = {
+                "toggle_visibility": self._hk_toggle.text().strip(),
+                "add_component": self._hk_add.text().strip(),
+                "toggle_lock": self._hk_lock.text().strip(),
+                "open_settings": self._hk_settings.text().strip(),
+                "clipboard_popup": self._hk_clipboard.text().strip(),
+            }
+        if hasattr(self, '_autostart_cb'):
+            s["_autostart"] = self._autostart_cb.isChecked()
+        return s
 
 
 # ---------------------------------------------------------------------------
@@ -5553,6 +8846,7 @@ class MainWindow(QMainWindow):
         if os.path.isfile(_icon_path):
             self.setWindowIcon(QIcon(_icon_path))
         self._panels_data = []; self._grids = []; self._scrolls = []; self._active = 0
+        self._per_monitor_active = False
         self._locked = False
         self._tb_dragging = False; self._tb_offset = QPoint()
 
@@ -5565,9 +8859,18 @@ class MainWindow(QMainWindow):
 
         self._build_ui(); self._apply_style(); self._load_data()
         if not self._panels_data:
-            self._create_panel("默认"); self._switch_panel(0)
+            self._first_launch_setup()
+        elif self._desktop_mode and len(QApplication.screens()) > 1 and not _settings.get("_monitor_mode_chosen"):
+            self._ask_monitor_mode()
+        elif self._desktop_mode and _settings.get("monitor_mode") == "per_monitor":
+            self._apply_per_monitor_panels()
         if self._desktop_mode:
             self._setup_tray()
+            self._setup_hotkeys()
+            if _settings.get("monitor_mode") == "per_monitor":
+                self._mon_switch_timer = QTimer(self)
+                self._mon_switch_timer.timeout.connect(self._auto_switch_monitor_panel)
+                self._mon_switch_timer.start(500)
 
     def _build_ui(self):
         cw = QWidget(); self.setCentralWidget(cw)
@@ -5759,6 +9062,40 @@ class MainWindow(QMainWindow):
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.show()
 
+    def _setup_hotkeys(self):
+        self._hotkey_mgr = _HotkeyManager.create()
+        hotkeys = _settings.get("hotkeys", {})
+        toggle_key = hotkeys.get("toggle_visibility", "")
+        add_key = hotkeys.get("add_component", "")
+        lock_key = hotkeys.get("toggle_lock", "")
+        settings_key = hotkeys.get("open_settings", "")
+        if toggle_key:
+            self._hotkey_mgr.register(toggle_key, self._toggle_visibility)
+        if add_key:
+            self._hotkey_mgr.register(add_key, self._on_add)
+        if lock_key:
+            self._hotkey_mgr.register(lock_key, self._toggle_lock)
+        if settings_key:
+            self._hotkey_mgr.register(settings_key, self._on_settings)
+        clip_key = hotkeys.get("clipboard_popup", "")
+        if clip_key:
+            self._hotkey_mgr.register(clip_key, self._show_clipboard_popup)
+        self._hotkey_mgr.start()
+
+    def _stop_hotkeys(self):
+        if hasattr(self, '_hotkey_mgr'):
+            self._hotkey_mgr.stop()
+
+    def _show_clipboard_popup(self):
+        print(f"[Clipboard] popup requested", flush=True)
+        try:
+            popup = _ClipboardPopup.get_or_create(None)
+            popup.show_at_cursor()
+            print(f"[Clipboard] popup shown at {popup.pos()}, visible={popup.isVisible()}", flush=True)
+        except Exception as e:
+            print(f"[Clipboard] ERROR: {e}", flush=True)
+            import traceback; traceback.print_exc()
+
     def _toggle_visibility(self):
         if self.isVisible():
             self.hide()
@@ -5773,8 +9110,10 @@ class MainWindow(QMainWindow):
 
     def _quit_app(self):
         self._save_data()
+        self._stop_hotkeys()
         if hasattr(self, '_tray'):
             self._tray.hide()
+        _X11DesktopBackend.restore_gnome_desktop()
         QApplication.instance().quit()
 
     # ---- Desktop right-click context menu ----
@@ -5792,27 +9131,177 @@ class MainWindow(QMainWindow):
             QMenu::separator {{ height: 1px; background: {C['surface1']}; margin: 4px 8px; }}
         """
 
+    def _quick_add(self, comp_type, cmd=""):
+        _DEFAULT_NAMES = {TYPE_CALENDAR: "日历", TYPE_WEATHER: "天气", TYPE_DOCK: "Dock栏",
+                          TYPE_TODO: "待办", TYPE_CLOCK: "时钟", TYPE_MONITOR: "系统监控",
+                          TYPE_LAUNCHER: "应用启动器", TYPE_QUICKACTION: "快捷操作",
+                          TYPE_NOTE: "便签", TYPE_MEDIA: "媒体控制", TYPE_CLIPBOARD: "剪贴板",
+                          TYPE_TIMER: "计时器", TYPE_GALLERY: "相册", TYPE_SYSINFO: "系统信息",
+                          TYPE_BOOKMARK: "书签", TYPE_CALC: "计算器", TYPE_TRASH: "回收站",
+                          TYPE_RSS: "RSS"}
+        _NEEDS_DIALOG = {TYPE_CMD, TYPE_CMD_WINDOW, TYPE_SHORTCUT}
+        if comp_type in _NEEDS_DIALOG:
+            self._on_add_with_type(comp_type)
+            return
+        if comp_type == TYPE_WEATHER:
+            self._on_add_with_type(comp_type)
+            return
+        name = _DEFAULT_NAMES.get(comp_type, comp_type)
+        d = ComponentData(name=name, comp_type=comp_type, cmd=cmd)
+        if comp_type == TYPE_NOTE:
+            d.cmd = "0|"
+        elif comp_type == TYPE_CLOCK and cmd in (CLOCK_SUB_ALARM,):
+            d.cmd = f"{cmd}|[]"
+        d.x, d.y = self._next_pos()
+        size_map = {
+            TYPE_CALENDAR: (16, 16), TYPE_DOCK: (20, 5), TYPE_TODO: (14, 12),
+            TYPE_LAUNCHER: (16, 20), TYPE_QUICKACTION: (18, 12), TYPE_NOTE: (12, 10),
+            TYPE_MEDIA: (16, 7), TYPE_CLIPBOARD: (14, 14), TYPE_TIMER: (12, 10),
+            TYPE_GALLERY: (14, 12), TYPE_SYSINFO: (16, 14), TYPE_BOOKMARK: (14, 12),
+            TYPE_CALC: (14, 16), TYPE_TRASH: (10, 8), TYPE_RSS: (16, 16),
+            TYPE_CLOCK: (10, 8), TYPE_WEATHER: (14, 12),
+        }
+        if comp_type == TYPE_MONITOR:
+            mon_sizes = {MONITOR_SUB_ALL: (22, 18), MONITOR_SUB_DISK: (18, 10)}
+            gw, gh = mon_sizes.get(cmd, (14, 10))
+        elif comp_type == TYPE_CLOCK:
+            clk_sizes = {CLOCK_SUB_STOPWATCH: (12, 12), CLOCK_SUB_TIMER: (12, 10)}
+            gw, gh = clk_sizes.get(cmd, (10, 8))
+        else:
+            gw, gh = size_map.get(comp_type, (10, 8))
+        d.w = GRID_SIZE * gw; d.h = GRID_SIZE * gh
+        grid = self._cg()
+        safe_top = grid._safe_margin_top
+        safe_bot = grid._safe_margin_bottom
+        avail_h = grid.height() - safe_top - safe_bot
+        if d.w > grid.width() or d.h > avail_h:
+            _confirm_dialog(self, "提示", "布局空间不足，请先调整布局")
+            return
+        free = self._find_free_pos(grid, d.w, d.h, safe_top, safe_bot)
+        if free is None:
+            _confirm_dialog(self, "提示", "布局空间不足，请先调整布局")
+            return
+        d.x, d.y = free
+        grid.add_component(d)
+        self._panels_data[self._active].components.append(d)
+        self._update_count(); self._sync_sizes()
+
+    def _on_add_with_type(self, comp_type):
+        dlg = CreateDialog(self)
+        idx = list(TYPE_LABELS.keys()).index(comp_type) if comp_type in TYPE_LABELS else 0
+        dlg.cat.setCurrentIndex(idx)
+        if dlg.exec_() == QDialog.Accepted:
+            d = dlg.get_data()
+            d.x, d.y = self._next_pos()
+            self._apply_default_size(d)
+            grid = self._cg()
+            safe_top = grid._safe_margin_top
+            safe_bot = grid._safe_margin_bottom
+            avail_h = grid.height() - safe_top - safe_bot
+            if d.w > grid.width() or d.h > avail_h:
+                _confirm_dialog(self, "提示", "布局空间不足，请先调整布局")
+                return
+            free = self._find_free_pos(grid, d.w, d.h, safe_top, safe_bot)
+            if free is None:
+                _confirm_dialog(self, "提示", "布局空间不足，请先调整布局")
+                return
+            d.x, d.y = free
+            grid.add_component(d)
+            self._panels_data[self._active].components.append(d)
+            self._update_count(); self._sync_sizes()
+
     def _show_desktop_ctx_menu(self, pos):
         menu = QMenu(self)
         menu.setStyleSheet(self._ctx_menu_style())
 
-        add_act = menu.addAction("＋  新建组件")
-        add_act.triggered.connect(self._on_add)
+        add_menu = menu.addMenu("＋  新建组件")
+        add_menu.setStyleSheet(self._ctx_menu_style())
+        _style = self._ctx_menu_style()
+
+        _simple = [
+            ("📋 剪贴板", TYPE_CLIPBOARD, ""),
+            ("📝 便签", TYPE_NOTE, ""),
+            ("✅ 待办", TYPE_TODO, ""),
+            ("🎛 快捷操作", TYPE_QUICKACTION, ""),
+            ("📅 日历", TYPE_CALENDAR, ""),
+            ("🔢 计算器", TYPE_CALC, ""),
+            ("🔖 书签", TYPE_BOOKMARK, ""),
+            ("🗑 回收站", TYPE_TRASH, ""),
+            ("🚀 应用启动器", TYPE_LAUNCHER, ""),
+            ("🎵 媒体控制", TYPE_MEDIA, ""),
+            ("🖼 相册", TYPE_GALLERY, ""),
+            ("💻 系统信息", TYPE_SYSINFO, ""),
+            ("📰 RSS", TYPE_RSS, ""),
+            ("📌 Dock栏", TYPE_DOCK, ""),
+        ]
+        for label, t, cmd in _simple:
+            act = add_menu.addAction(label)
+            act.triggered.connect(lambda _, tp=t, c=cmd: self._quick_add(tp, c))
+
+        add_menu.addSeparator()
+
+        clock_sub = add_menu.addMenu("🕐 时钟")
+        clock_sub.setStyleSheet(_style)
+        for sub_id, sub_name in CLOCK_SUB_LABELS.items():
+            act = clock_sub.addAction(sub_name)
+            act.triggered.connect(lambda _, s=sub_id: self._quick_add(TYPE_CLOCK, s))
+
+        mon_sub = add_menu.addMenu("📊 系统监控")
+        mon_sub.setStyleSheet(_style)
+        for sub_id, sub_name in MONITOR_SUB_LABELS.items():
+            act = mon_sub.addAction(sub_name)
+            act.triggered.connect(lambda _, s=sub_id: self._quick_add(TYPE_MONITOR, s))
+
+        weather_act = add_menu.addAction("🌤 天气")
+        weather_act.triggered.connect(lambda: self._quick_add(TYPE_WEATHER))
+
+        add_menu.addSeparator()
+        cmd_act = add_menu.addAction("⌨ CMD 命令")
+        cmd_act.triggered.connect(lambda: self._quick_add(TYPE_CMD))
+        cmdwin_act = add_menu.addAction("🖥 CMD 窗口")
+        cmdwin_act.triggered.connect(lambda: self._quick_add(TYPE_CMD_WINDOW))
+        shortcut_act = add_menu.addAction("🔗 快捷方式")
+        shortcut_act.triggered.connect(lambda: self._quick_add(TYPE_SHORTCUT))
+
         menu.addSeparator()
 
         panel_menu = menu.addMenu("面板")
         panel_menu.setStyleSheet(self._ctx_menu_style())
+        _is_per_mon = _settings.get("monitor_mode") == "per_monitor"
+        _mpm = _settings.get("monitor_panel_map", {})
+        _cur_screen = QApplication.screenAt(pos)
+        _cur_screen_name = _cur_screen.name() if _cur_screen else ""
+        _cur_panel_idx = _mpm.get(_cur_screen_name, self._active) if _is_per_mon else self._active
         for i, pd in enumerate(self._panels_data):
-            act = panel_menu.addAction(("● " if i == self._active else "    ") + pd.name)
-            act.triggered.connect(lambda checked, idx=i: self._switch_panel(idx))
+            is_cur = (i == _cur_panel_idx) if _is_per_mon else (i == self._active)
+            label = ("● " if is_cur else "    ") + pd.name
+            if _is_per_mon:
+                tags = []
+                for sn, pi in _mpm.items():
+                    if pi == i:
+                        if sn == _cur_screen_name:
+                            tags.append("当前显示器")
+                        else:
+                            tags.append(sn)
+                if tags:
+                    label += "  (" + ", ".join(tags) + ")"
+            act = panel_menu.addAction(label)
+            if _is_per_mon and _cur_screen_name:
+                act.triggered.connect(lambda checked, idx=i, scr=_cur_screen_name: self._assign_panel_to_monitor(scr, idx))
+            else:
+                act.triggered.connect(lambda checked, idx=i: self._switch_panel(idx))
         panel_menu.addSeparator()
         add_panel_act = panel_menu.addAction("＋  新建面板")
         add_panel_act.triggered.connect(self._on_add_panel)
         if len(self._panels_data) > 1:
+            _can_delete = True
+            if _is_per_mon and len(self._panels_data) <= len(QApplication.screens()):
+                _can_delete = False
             rename_act = panel_menu.addAction("✏  重命名当前面板")
             rename_act.triggered.connect(lambda: self._on_rename_panel(self._active))
-            del_act = panel_menu.addAction("🗑  删除当前面板")
-            del_act.triggered.connect(lambda: self._on_delete_panel(self._active))
+            if _can_delete:
+                del_act = panel_menu.addAction("🗑  删除当前面板")
+                del_act.triggered.connect(lambda: self._on_delete_panel(self._active))
         copy_act = panel_menu.addAction("📋  复制当前面板")
         copy_act.triggered.connect(lambda: self._on_copy_panel(self._active))
 
@@ -5842,13 +9331,17 @@ class MainWindow(QMainWindow):
         pd = pd or PanelData(name=name); self._panels_data.append(pd)
         sc = QScrollArea(); sc.setWidgetResizable(False)
         sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        if _DESKTOP_MODE:
+            sc.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         g = GridPanel(); g.data_changed.connect(self._on_data_changed)
         if self._desktop_mode:
             g.desktop_ctx_menu_requested.connect(self._show_desktop_ctx_menu)
             if self._desktop_backend:
                 avail = self._desktop_backend.get_available_geometry()
                 full = self._desktop_backend.get_full_geometry()
-                g.set_safe_margins(avail.y() - full.y(), (full.y() + full.height()) - (avail.y() + avail.height()))
+                safe_t = avail.y() - full.y()
+                safe_b = (full.y() + full.height()) - (avail.y() + avail.height())
+                g.set_safe_margins(safe_t, safe_b)
         sc.setWidget(g)
         self._grids.append(g); self._scrolls.append(sc); self._stack.addWidget(sc)
         idx = self._tab_bar.add_tab(name)
@@ -5906,11 +9399,104 @@ class MainWindow(QMainWindow):
                 self._save_data()
 
     def _on_delete_panel(self, idx):
-        if len(self._panels_data)<=1: return
+        if len(self._panels_data) <= 1: return
+        if _settings.get("monitor_mode") == "per_monitor":
+            n_screens = len(QApplication.screens())
+            if len(self._panels_data) <= n_screens:
+                _confirm_dialog(self, "无法删除",
+                    f"当前为「每个显示器独立面板」模式，面板数量（{len(self._panels_data)}）"
+                    f"不能少于显示器数量（{n_screens}）。")
+                return
         if not _confirm_dialog(self, "确认", f"删除面板「{self._panels_data[idx].name}」？"): return
         self._panels_data.pop(idx); g = self._grids.pop(idx); s = self._scrolls.pop(idx)
-        g.clear_all(); self._stack.removeWidget(s); s.deleteLater(); self._tab_bar.remove_tab(idx)
-        self._switch_panel(min(idx, len(self._panels_data)-1)); self._save_data()
+        g.clear_all(); s.deleteLater(); self._tab_bar.remove_tab(idx)
+        if _settings.get("monitor_mode") == "per_monitor":
+            mpm = _settings.get("monitor_panel_map", {})
+            new_mpm = {}
+            for sn, pi in mpm.items():
+                if pi == idx:
+                    new_mpm[sn] = min(idx, len(self._panels_data) - 1)
+                elif pi > idx:
+                    new_mpm[sn] = pi - 1
+                else:
+                    new_mpm[sn] = pi
+            _settings["monitor_panel_map"] = new_mpm
+            _save_settings(_settings)
+            self._enter_per_monitor_mode()
+        else:
+            self._switch_panel(min(idx, len(self._panels_data)-1))
+        self._save_data()
+
+    def _assign_panel_to_monitor(self, screen_name, panel_idx):
+        mpm = _settings.get("monitor_panel_map", {})
+        old_panel = mpm.get(screen_name)
+        for sn, pi in list(mpm.items()):
+            if pi == panel_idx and sn != screen_name:
+                if old_panel is not None:
+                    mpm[sn] = old_panel
+                break
+        mpm[screen_name] = panel_idx
+        _settings["monitor_panel_map"] = mpm
+        _save_settings(_settings)
+        if getattr(self, '_per_monitor_active', False):
+            self._enter_per_monitor_mode()
+        else:
+            self._switch_panel(panel_idx)
+
+    def _enter_per_monitor_mode(self):
+        if not self._desktop_mode:
+            return
+        mpm = _settings.get("monitor_panel_map", {})
+        if not mpm:
+            return
+        self._per_monitor_active = True
+        self._stack.hide()
+        cw = self.centralWidget()
+        full_geo = self._desktop_backend.get_full_geometry() if self._desktop_backend else QApplication.primaryScreen().virtualGeometry()
+        for sc in self._scrolls:
+            sc.hide()
+        shown_panels = set()
+        for screen in QApplication.screens():
+            sn = screen.name()
+            pi = mpm.get(sn, 0)
+            if 0 <= pi < len(self._scrolls) and pi not in shown_panels:
+                shown_panels.add(pi)
+                sc = self._scrolls[pi]
+                if sc.parent() != cw:
+                    sc.setParent(cw)
+                geo = screen.geometry()
+                x = geo.x() - full_geo.x()
+                y = geo.y() - full_geo.y()
+                sc.setGeometry(x, y, geo.width(), geo.height())
+                sc.show()
+                sc.raise_()
+                g = self._grids[pi]
+                g.recalc_size(geo.width(), geo.height())
+        cur_screen = QApplication.screenAt(QCursor.pos())
+        if cur_screen and cur_screen.name() in mpm:
+            self._active = mpm[cur_screen.name()]
+            self._tab_bar.set_active(self._active)
+            self._update_count()
+
+    def _exit_per_monitor_mode(self):
+        self._per_monitor_active = False
+        for sc in self._scrolls:
+            sc.setParent(self._stack)
+            self._stack.addWidget(sc)
+        self._stack.show()
+        self._switch_panel(self._active)
+
+    def _auto_switch_monitor_panel(self):
+        if not self._desktop_mode or _settings.get("monitor_mode") != "per_monitor":
+            return
+        mpm = _settings.get("monitor_panel_map", {})
+        cur_screen = QApplication.screenAt(QCursor.pos())
+        if cur_screen and cur_screen.name() in mpm:
+            target = mpm[cur_screen.name()]
+            if target != self._active and 0 <= target < len(self._panels_data):
+                self._active = target
+                self._tab_bar.set_active(target)
+                self._update_count()
 
     def _cg(self): return self._grids[self._active]
     def _cs(self): return self._scrolls[self._active]
@@ -5921,6 +9507,9 @@ class MainWindow(QMainWindow):
             self._position_hover_zone()
     def showEvent(self, e): super().showEvent(e); QTimer.singleShot(0, self._sync_sizes)
     def _sync_sizes(self):
+        if getattr(self, '_per_monitor_active', False):
+            self._enter_per_monitor_mode()
+            return
         for s, g in zip(self._scrolls, self._grids):
             vp = s.viewport(); g.recalc_size(vp.width(), vp.height())
     def _update_count(self): self._cnt.setText(f"{len(self._cg().components)} 个组件")
@@ -5938,6 +9527,74 @@ class MainWindow(QMainWindow):
         x, y = mr+GRID_SIZE, ry
         if x+320 > vw: x, y = 40, rb+GRID_SIZE
         return snap(x), snap(y)
+
+    def _find_free_pos(self, grid, w, h, safe_top, safe_bot):
+        gw = grid.width()
+        gh = grid.height()
+        occupied = [(c.data.x, c.data.y, c.data.w, c.data.h) for c in grid.components]
+        start_y = ((safe_top + GRID_SIZE - 1) // GRID_SIZE) * GRID_SIZE
+        max_y = gh - safe_bot - h
+
+        def overlaps(nx, ny):
+            for ox, oy, ow, oh in occupied:
+                if nx < ox + ow and nx + w > ox and ny < oy + oh and ny + h > oy:
+                    return True
+            return False
+
+        for y in range(start_y, max_y + 1, GRID_SIZE):
+            for x in range(0, gw - w + 1, GRID_SIZE):
+                if not overlaps(x, y):
+                    return (x, y)
+        return None
+
+    def _apply_default_size(self, d):
+        """Set default w/h for a ComponentData based on its type."""
+        t = d.comp_type
+        if t == TYPE_CMD:
+            np = count_params(d.cmd)
+            if d.show_output:
+                d.w = 320; d.h = max(160 + np * 38 + 120, 300)
+            elif np > 0:
+                d.w = 320; d.h = GRID_SIZE * 2 + np * 38
+            else:
+                d.w = GRID_SIZE * 13; d.h = GRID_SIZE * 2
+        elif t == TYPE_CMD_WINDOW:
+            d.w = 320; d.h = 340
+        elif t == TYPE_SHORTCUT:
+            d.w = GRID_SIZE * 4; d.h = GRID_SIZE * 4
+        elif t == TYPE_CALENDAR:
+            d.w = GRID_SIZE * 16; d.h = GRID_SIZE * 16
+        elif t == TYPE_WEATHER:
+            d.w = GRID_SIZE * 14; d.h = GRID_SIZE * 12
+        elif t == TYPE_DOCK:
+            d.w = GRID_SIZE * 20; d.h = GRID_SIZE * 5
+        elif t == TYPE_TODO:
+            d.w = GRID_SIZE * 14; d.h = GRID_SIZE * 12
+        elif t == TYPE_CLOCK:
+            sub = d.cmd.split("|")[0] if d.cmd else CLOCK_SUB_CLOCK
+            if sub == CLOCK_SUB_STOPWATCH:
+                d.w = GRID_SIZE * 12; d.h = GRID_SIZE * 12
+            elif sub == CLOCK_SUB_TIMER:
+                d.w = GRID_SIZE * 12; d.h = GRID_SIZE * 10
+            else:
+                d.w = GRID_SIZE * 10; d.h = GRID_SIZE * 8
+        elif t == TYPE_MONITOR:
+            sub = d.cmd.strip() if d.cmd else MONITOR_SUB_ALL
+            if sub == MONITOR_SUB_ALL:
+                d.w = GRID_SIZE * 22; d.h = GRID_SIZE * 18
+            elif sub == MONITOR_SUB_DISK:
+                d.w = GRID_SIZE * 18; d.h = GRID_SIZE * 10
+            else:
+                d.w = GRID_SIZE * 14; d.h = GRID_SIZE * 10
+        else:
+            _sizes = {
+                TYPE_LAUNCHER: (16, 20), TYPE_NOTE: (12, 10), TYPE_QUICKACTION: (18, 12),
+                TYPE_MEDIA: (16, 7), TYPE_CLIPBOARD: (14, 14), TYPE_TIMER: (12, 10),
+                TYPE_GALLERY: (14, 12), TYPE_SYSINFO: (16, 14), TYPE_BOOKMARK: (14, 12),
+                TYPE_CALC: (14, 16), TYPE_TRASH: (10, 8), TYPE_RSS: (16, 16),
+            }
+            gw, gh = _sizes.get(t, (10, 8))
+            d.w = GRID_SIZE * gw; d.h = GRID_SIZE * gh
 
     def _on_add(self):
         dlg = CreateDialog(self)
@@ -5972,9 +9629,54 @@ class MainWindow(QMainWindow):
                     d.w = GRID_SIZE * 12; d.h = GRID_SIZE * 10
                 else:
                     d.w = GRID_SIZE * 10; d.h = GRID_SIZE * 8
+            elif d.comp_type == TYPE_MONITOR:
+                sub = d.cmd.strip() if d.cmd else MONITOR_SUB_ALL
+                if sub == MONITOR_SUB_ALL:
+                    d.w = GRID_SIZE * 22; d.h = GRID_SIZE * 18
+                elif sub == MONITOR_SUB_DISK:
+                    d.w = GRID_SIZE * 18; d.h = GRID_SIZE * 10
+                else:
+                    d.w = GRID_SIZE * 14; d.h = GRID_SIZE * 10
+            elif d.comp_type == TYPE_LAUNCHER:
+                d.w = GRID_SIZE * 16; d.h = GRID_SIZE * 20
+            elif d.comp_type == TYPE_NOTE:
+                d.w = GRID_SIZE * 12; d.h = GRID_SIZE * 10
+            elif d.comp_type == TYPE_QUICKACTION:
+                d.w = GRID_SIZE * 18; d.h = GRID_SIZE * 12
+            elif d.comp_type == TYPE_MEDIA:
+                d.w = GRID_SIZE * 16; d.h = GRID_SIZE * 7
+            elif d.comp_type == TYPE_CLIPBOARD:
+                d.w = GRID_SIZE * 14; d.h = GRID_SIZE * 14
+            elif d.comp_type == TYPE_TIMER:
+                d.w = GRID_SIZE * 12; d.h = GRID_SIZE * 10
+            elif d.comp_type == TYPE_GALLERY:
+                d.w = GRID_SIZE * 14; d.h = GRID_SIZE * 12
+            elif d.comp_type == TYPE_SYSINFO:
+                d.w = GRID_SIZE * 16; d.h = GRID_SIZE * 14
+            elif d.comp_type == TYPE_BOOKMARK:
+                d.w = GRID_SIZE * 14; d.h = GRID_SIZE * 12
+            elif d.comp_type == TYPE_CALC:
+                d.w = GRID_SIZE * 14; d.h = GRID_SIZE * 16
+            elif d.comp_type == TYPE_TRASH:
+                d.w = GRID_SIZE * 12; d.h = GRID_SIZE * 7
+            elif d.comp_type == TYPE_RSS:
+                d.w = GRID_SIZE * 16; d.h = GRID_SIZE * 16
             else:
                 d.w = 320; d.h = 200
-            self._cg().add_component(d)
+            grid = self._cg()
+            gw = grid.width()
+            safe_top = grid._safe_margin_top
+            safe_bot = grid._safe_margin_bottom
+            gh = grid.height() - safe_top - safe_bot
+            if d.w > gw or d.h > gh:
+                _confirm_dialog(self, "提示", "布局空间不足，请先调整布局")
+                return
+            pos = self._find_free_pos(grid, d.w, d.h, safe_top, safe_bot)
+            if pos is None:
+                _confirm_dialog(self, "提示", "布局空间不足，请先调整布局")
+                return
+            d.x, d.y = pos
+            grid.add_component(d)
             self._panels_data[self._active].components.append(d)
             self._update_count(); self._sync_sizes()
 
@@ -6003,6 +9705,110 @@ class MainWindow(QMainWindow):
             for p in obj.get("panels", []): self._create_panel(PanelData.from_dict(p).name, PanelData.from_dict(p))
             if self._panels_data: self._switch_panel(min(obj.get("active", 0), len(self._panels_data)-1))
         except Exception: pass
+
+    def _first_launch_setup(self):
+        screens = QApplication.screens()
+        if self._desktop_mode and len(screens) > 1 and not _settings.get("_monitor_mode_chosen"):
+            from PyQt5.QtWidgets import QDialogButtonBox
+            dlg = QDialog(self)
+            dlg.setWindowTitle("多显示器设置")
+            dlg.setFixedWidth(420)
+            dlg.setStyleSheet(_dialog_style())
+            lay = QVBoxLayout(dlg); lay.setSpacing(16); lay.setContentsMargins(28, 24, 28, 24)
+            h = QLabel("🖥  检测到多个显示器"); h.setObjectName("heading"); lay.addWidget(h)
+            info = QLabel(f"当前有 {len(screens)} 个显示器，请选择布局方式：")
+            info.setStyleSheet(f"color:{C['subtext0']};font-size:13px;")
+            info.setWordWrap(True); lay.addWidget(info)
+
+            opt1 = QPushButton("📐 所有显示器共用一个面板")
+            opt1.setStyleSheet(f"QPushButton{{background:{C['surface0']};color:{C['text']};border:1px solid {C['surface2']};"
+                               f"border-radius:10px;padding:14px;font-size:13px;text-align:left;}}"
+                               f"QPushButton:hover{{border-color:{C['blue']};background:{C['surface1']};}}")
+            opt1.setCursor(Qt.PointingHandCursor)
+            lay.addWidget(opt1)
+
+            opt2 = QPushButton("🖥 每个显示器独立面板")
+            opt2.setStyleSheet(f"QPushButton{{background:{C['surface0']};color:{C['text']};border:1px solid {C['surface2']};"
+                               f"border-radius:10px;padding:14px;font-size:13px;text-align:left;}}"
+                               f"QPushButton:hover{{border-color:{C['blue']};background:{C['surface1']};}}")
+            opt2.setCursor(Qt.PointingHandCursor)
+            lay.addWidget(opt2)
+
+            choice = [None]
+            opt1.clicked.connect(lambda: (choice.__setitem__(0, "single"), dlg.accept()))
+            opt2.clicked.connect(lambda: (choice.__setitem__(0, "per_monitor"), dlg.accept()))
+            dlg.exec_()
+
+            _settings["_monitor_mode_chosen"] = True
+            _settings["monitor_mode"] = choice[0] or "single"
+            _save_settings(_settings)
+
+            if choice[0] == "per_monitor":
+                for s in screens:
+                    self._create_panel(s.name())
+                self._switch_panel(0)
+                return
+
+        self._create_panel("默认"); self._switch_panel(0)
+
+    def _ask_monitor_mode(self):
+        screens = QApplication.screens()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("多显示器设置")
+        dlg.setFixedWidth(420)
+        dlg.setStyleSheet(_dialog_style())
+        lay = QVBoxLayout(dlg); lay.setSpacing(16); lay.setContentsMargins(28, 24, 28, 24)
+        h = QLabel("🖥  检测到多个显示器"); h.setObjectName("heading"); lay.addWidget(h)
+        info = QLabel(f"当前有 {len(screens)} 个显示器，请选择布局方式：")
+        info.setStyleSheet(f"color:{C['subtext0']};font-size:13px;")
+        info.setWordWrap(True); lay.addWidget(info)
+
+        opt1 = QPushButton("📐 所有显示器共用一个面板")
+        opt1.setStyleSheet(f"QPushButton{{background:{C['surface0']};color:{C['text']};border:1px solid {C['surface2']};"
+                           f"border-radius:10px;padding:14px;font-size:13px;text-align:left;}}"
+                           f"QPushButton:hover{{border-color:{C['blue']};background:{C['surface1']};}}")
+        opt1.setCursor(Qt.PointingHandCursor); lay.addWidget(opt1)
+
+        opt2 = QPushButton("🖥 每个显示器独立面板")
+        opt2.setStyleSheet(f"QPushButton{{background:{C['surface0']};color:{C['text']};border:1px solid {C['surface2']};"
+                           f"border-radius:10px;padding:14px;font-size:13px;text-align:left;}}"
+                           f"QPushButton:hover{{border-color:{C['blue']};background:{C['surface1']};}}")
+        opt2.setCursor(Qt.PointingHandCursor); lay.addWidget(opt2)
+
+        choice = [None]
+        opt1.clicked.connect(lambda: (choice.__setitem__(0, "single"), dlg.accept()))
+        opt2.clicked.connect(lambda: (choice.__setitem__(0, "per_monitor"), dlg.accept()))
+        dlg.exec_()
+
+        _settings["_monitor_mode_chosen"] = True
+        _settings["monitor_mode"] = choice[0] or "single"
+        _save_settings(_settings)
+
+        if choice[0] == "per_monitor":
+            self._apply_per_monitor_panels()
+
+    def _apply_per_monitor_panels(self):
+        screens = QApplication.screens()
+        needed = len(screens) - len(self._panels_data)
+        if needed > 0:
+            existing_names = {p.name for p in self._panels_data}
+            idx = 1
+            for _ in range(needed):
+                name = f"面板{idx}"
+                while name in existing_names:
+                    idx += 1
+                    name = f"面板{idx}"
+                existing_names.add(name)
+                self._create_panel(name)
+                idx += 1
+        mpm = _settings.get("monitor_panel_map", {})
+        for i, s in enumerate(screens):
+            if s.name() not in mpm:
+                mpm[s.name()] = min(i, len(self._panels_data) - 1)
+        _settings["monitor_panel_map"] = mpm
+        _save_settings(_settings)
+        self._enter_per_monitor_mode()
+        self._save_data()
 
     def _on_export(self):
         dlg = ExportDialog(self._panels_data, self)
@@ -6151,7 +9957,16 @@ class MainWindow(QMainWindow):
                 w.setProperty("locked", self._locked)
 
     def _on_settings(self):
+        if hasattr(self, '_settings_dlg') and self._settings_dlg is not None:
+            try:
+                if self._settings_dlg.isVisible():
+                    self._settings_dlg.raise_()
+                    self._settings_dlg.activateWindow()
+                    return
+            except RuntimeError:
+                self._settings_dlg = None
         dlg = SettingsDialog(self)
+        self._settings_dlg = dlg
         if dlg.exec_() == QDialog.Accepted:
             global C, _settings
             s = dlg.get_settings()
@@ -6163,10 +9978,33 @@ class MainWindow(QMainWindow):
             for g in self._grids:
                 pal = g.palette(); pal.setColor(pal.Window, QColor(C["crust"])); g.setPalette(pal)
                 g.set_bg_image(s.get("bg_image", ""), s.get("bg_opacity", 30))
+                g.set_bg_gradient(s.get("bg_gradient", ""))
+                g.set_bg_mode(s.get("bg_mode", "tile"))
+                g.set_per_monitor_bg(s.get("bg_per_monitor", {}))
+                g.set_bg_slideshow(s.get("bg_slideshow_dir", ""), s.get("bg_slideshow_interval", 300))
                 g.set_show_grid(_settings.get("show_grid", True))
                 for w in g.components:
                     w.setStyleSheet(cs)
+                    w.refresh_theme()
                 g.update()
+            if self._desktop_mode and "hotkeys" in s:
+                self._stop_hotkeys()
+                self._setup_hotkeys()
+            if "_autostart" in s:
+                _set_autostart(s["_autostart"])
+                s.pop("_autostart", None)
+            if _settings.get("monitor_mode") == "per_monitor":
+                self._apply_per_monitor_panels()
+                if not hasattr(self, '_mon_switch_timer') or self._mon_switch_timer is None:
+                    self._mon_switch_timer = QTimer(self)
+                    self._mon_switch_timer.timeout.connect(self._auto_switch_monitor_panel)
+                    self._mon_switch_timer.start(500)
+            else:
+                if hasattr(self, '_mon_switch_timer') and self._mon_switch_timer is not None:
+                    self._mon_switch_timer.stop()
+                    self._mon_switch_timer = None
+                if getattr(self, '_per_monitor_active', False):
+                    self._exit_per_monitor_mode()
 
     def mousePressEvent(self, e):
         if self._desktop_mode:
@@ -6213,7 +10051,32 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
 
+def _ensure_single_instance():
+    import fcntl
+    lock_path = os.path.join(os.path.expanduser("~"), ".fastpanel.lock")
+    fp = open(lock_path, 'w')
+    try:
+        fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fp.write(str(os.getpid()))
+        fp.flush()
+        return fp
+    except IOError:
+        try:
+            old_pid = int(open(lock_path).read().strip())
+            os.kill(old_pid, 0)
+            print(f"[FastPanel] 已有实例运行 (PID {old_pid})，正在退出...", flush=True)
+            sys.exit(0)
+        except (ValueError, ProcessLookupError, PermissionError):
+            fcntl.flock(fp, fcntl.LOCK_EX)
+            fp.seek(0); fp.truncate()
+            fp.write(str(os.getpid()))
+            fp.flush()
+            return fp
+
+
 def main():
+    lock_fp = _ensure_single_instance()
+
     parser = argparse.ArgumentParser(description="FastPanel — Desktop Widget Engine")
     parser.add_argument("--windowed", action="store_true", help="以窗口模式运行（默认为桌面模式）")
     parser.add_argument("--desktop", action="store_true", help="强制桌面模式")
@@ -6240,6 +10103,11 @@ def main():
             padding: 4px 8px; font-size: 12px;
         }}
     """)
+    if sys.platform == "linux":
+        try:
+            _install_desktop_entry()
+        except Exception:
+            pass
     win = MainWindow()
     if _DESKTOP_MODE:
         win.show()
