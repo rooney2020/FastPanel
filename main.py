@@ -226,6 +226,9 @@ class DesktopBackend:
         raise NotImplementedError
 
     def get_available_geometry(self):
+        wa = self._read_net_workarea()
+        if wa:
+            return wa
         screens = QApplication.screens()
         if len(screens) <= 1:
             return QApplication.primaryScreen().availableGeometry()
@@ -239,6 +242,24 @@ class DesktopBackend:
 
     def get_screens_info(self):
         return [(s.name(), s.geometry(), s.availableGeometry()) for s in QApplication.screens()]
+
+    def _read_net_workarea(self):
+        if sys.platform != 'linux':
+            return None
+        try:
+            out = subprocess.check_output(
+                ["xprop", "-root", "_NET_WORKAREA"],
+                timeout=2, stderr=subprocess.DEVNULL
+            ).decode().strip()
+            parts = out.split("=", 1)
+            if len(parts) < 2:
+                return None
+            vals = [int(v.strip()) for v in parts[1].split(",")[:4]]
+            if len(vals) == 4:
+                return QRect(vals[0], vals[1], vals[2], vals[3])
+        except Exception:
+            pass
+        return None
 
     @property
     def name(self):
@@ -258,7 +279,7 @@ class _X11DesktopBackend(DesktopBackend):
         )
         window.setAttribute(Qt.WA_X11NetWmWindowTypeDesktop, True)
         window.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        geo = self.get_available_geometry()
+        geo = self.get_full_geometry()
         window.setGeometry(geo)
         QTimer.singleShot(100, lambda: self._set_x11_hints(window))
 
@@ -285,7 +306,7 @@ class _WaylandDesktopBackend(DesktopBackend):
             | Qt.WindowStaysOnBottomHint
         )
         window.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        geo = self.get_available_geometry()
+        geo = self.get_full_geometry()
         window.setGeometry(geo)
 
 
@@ -301,7 +322,7 @@ class _WindowsDesktopBackend(DesktopBackend):
             | Qt.Tool
         )
         window.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        geo = self.get_available_geometry()
+        geo = self.get_full_geometry()
         window.setGeometry(geo)
         QTimer.singleShot(200, lambda: self._embed_in_desktop(window))
 
@@ -340,7 +361,7 @@ class _MacDesktopBackend(DesktopBackend):
             | Qt.Tool
         )
         window.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        geo = self.get_available_geometry()
+        geo = self.get_full_geometry()
         window.setGeometry(geo)
         try:
             import objc
@@ -362,7 +383,7 @@ class _FallbackDesktopBackend(DesktopBackend):
             Qt.FramelessWindowHint
             | Qt.WindowStaysOnBottomHint
         )
-        geo = self.get_available_geometry()
+        geo = self.get_full_geometry()
         window.setGeometry(geo)
 
 
@@ -855,9 +876,13 @@ class DragResizeMixin:
             return True
         if self._dragging:
             p = e.globalPos() - self._drag_offset
-            pw = self.parent().width() if self.parent() else 9999
+            par = self.parent()
+            pw = par.width() if par else 9999
+            safe_top = getattr(par, '_safe_margin_top', 0) if par else 0
+            safe_bottom = getattr(par, '_safe_margin_bottom', 0) if par else 0
+            ph = par.height() if par else 9999
             p.setX(max(0, min(p.x(), pw-self.width())))
-            p.setY(max(0, p.y()))
+            p.setY(max(safe_top, min(p.y(), ph - safe_bottom - self.height())))
             self.move(p)
             return True
         edges = self._detect_edges(e.pos())
@@ -870,8 +895,13 @@ class DragResizeMixin:
     def handle_release(self, e, data):
         if self._dragging:
             x, y = snap(self.x()), snap(self.y())
-            pw = self.parent().width() if self.parent() else 9999
+            par = self.parent()
+            pw = par.width() if par else 9999
+            safe_top = getattr(par, '_safe_margin_top', 0) if par else 0
+            safe_bottom = getattr(par, '_safe_margin_bottom', 0) if par else 0
+            ph = par.height() if par else 9999
             x = max(0, min(x, pw-self.width()))
+            y = max(safe_top, min(y, ph - safe_bottom - self.height()))
             self.move(x, y)
             data.x, data.y = x, y
             self._dragging = False
@@ -4289,6 +4319,8 @@ class GridPanel(QWidget):
         self._bg_pixmap = None
         self._bg_opacity = 30
         self._show_grid = _settings.get("show_grid", True)
+        self._safe_margin_top = 0
+        self._safe_margin_bottom = 0
         self.setAutoFillBackground(True)
         self.setMouseTracking(True)
         pal = self.palette(); pal.setColor(pal.Window, QColor(C["crust"])); self.setPalette(pal)
@@ -4305,6 +4337,10 @@ class GridPanel(QWidget):
         else:
             self._bg_pixmap = None
         self._bg_opacity = opacity
+
+    def set_safe_margins(self, top, bottom):
+        self._safe_margin_top = top
+        self._safe_margin_bottom = bottom
 
     def set_show_grid(self, show):
         self._show_grid = show
@@ -5809,6 +5845,10 @@ class MainWindow(QMainWindow):
         g = GridPanel(); g.data_changed.connect(self._on_data_changed)
         if self._desktop_mode:
             g.desktop_ctx_menu_requested.connect(self._show_desktop_ctx_menu)
+            if self._desktop_backend:
+                avail = self._desktop_backend.get_available_geometry()
+                full = self._desktop_backend.get_full_geometry()
+                g.set_safe_margins(avail.y() - full.y(), (full.y() + full.height()) - (avail.y() + avail.height()))
         sc.setWidget(g)
         self._grids.append(g); self._scrolls.append(sc); self._stack.addWidget(sc)
         idx = self._tab_bar.add_tab(name)
@@ -5887,7 +5927,9 @@ class MainWindow(QMainWindow):
 
     def _next_pos(self):
         cs = self._cg().components
-        if not cs: return 40, 40
+        safe_top = self._cg()._safe_margin_top
+        start_y = max(40, safe_top + GRID_SIZE)
+        if not cs: return 40, snap(start_y)
         vw = self._cs().viewport().width(); mr, ry, rb = 0, 0, 0
         for c in cs:
             r = c.data.x+c.data.w; b = c.data.y+c.data.h
