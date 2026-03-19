@@ -1,10 +1,35 @@
 # FastPanel
 
-基于 PyQt5 的 Linux 桌面快捷面板，支持多种可定制组件，采用 Catppuccin 主题配色。
+基于 PyQt5 的桌面 Widget 引擎，支持多种可定制组件，采用 Catppuccin 主题配色。默认以桌面模式运行，窗口置于壁纸层，不影响系统桌面环境。
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue)
 ![PyQt5](https://img.shields.io/badge/PyQt5-5.15+-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
+
+## 运行模式
+
+| 模式 | 命令 | 说明 |
+|---|---|---|
+| **桌面模式**（默认） | `python3 main.py` | 全屏置底，作为桌面层运行，右键菜单操作 |
+| 窗口模式 | `python3 main.py --windowed` | 传统窗口，带工具栏和标题按钮 |
+
+### 桌面模式特性
+
+- 窗口类型设为 `_NET_WM_WINDOW_TYPE_DESKTOP`，始终在所有窗口之下
+- 不出现在任务栏和 Alt+Tab 中
+- GNOME 状态栏、Dock、通知等系统功能完全不受影响
+- 通过**右键桌面空白区域**访问所有操作（创建组件、切换面板、设置等）
+- **系统托盘图标**提供快速控制（显示/隐藏、设置、退出）
+- 关闭或崩溃后桌面自动恢复
+
+### 平台支持
+
+| 平台 | 状态 |
+|---|---|
+| Linux X11 | 完全支持 |
+| Linux Wayland | 降级支持（WindowStaysOnBottom） |
+| Windows 10/11 | 基础支持（WorkerW 嵌入） |
+| macOS | 基础支持（桌面层级） |
 
 ## 功能特性
 
@@ -31,10 +56,11 @@
 
 ### 面板管理
 
-- 多面板切换（标签栏）
+- 多面板切换（桌面模式：右键菜单；窗口模式：标签栏）
 - 组件自由拖拽、调整大小
 - 组件分组 / 复制 / 导出导入
 - 网格吸附对齐
+- 锁定布局防止误操作
 
 ### 主题
 
@@ -46,18 +72,20 @@
 pip install PyQt5
 ```
 
-## 运行
-
-```bash
-python3 main.py
-```
-
 ## 使用
 
-1. 右键网格区域 → **创建组件**，选择类型并配置
+### 桌面模式
+
+1. 右键桌面空白区域 → **新建组件**，选择类型并配置
 2. 拖拽组件调整位置和大小
 3. 右键组件可编辑、复制、删除
-4. 顶部标签栏管理多个面板
+4. 右键桌面 → **面板** 切换不同面板
+5. 系统托盘图标提供快速控制
+
+### 窗口模式
+
+1. 顶部工具栏操作
+2. 底部标签栏管理面板
 
 ## 项目结构
 
@@ -75,5 +103,6 @@ FastPanel/
 
 - Python 3.8+
 - PyQt5 5.15+
-- Linux (Ubuntu/Debian 推荐)
+- Linux (Ubuntu/Debian 推荐) / Windows 10+ / macOS
+- xprop（Linux X11 桌面模式，通常已预装）
 - PulseAudio（闹钟/计时器声音提醒）

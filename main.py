@@ -16,13 +16,16 @@ import urllib.parse
 import threading
 import configparser
 import glob as glob_mod
+import ctypes
+import ctypes.util
+import argparse
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFrame, QScrollArea, QLineEdit, QComboBox,
     QCheckBox, QTextEdit, QDialog, QFormLayout, QSpinBox,
     QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QSizePolicy, QFileDialog, QMenu,
-    QStackedWidget, QStackedLayout
+    QStackedWidget, QStackedLayout, QSystemTrayIcon, QAction
 )
 from PyQt5.QtCore import Qt, QPoint, QRect, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QFont, QPainter, QColor, QPixmap, QIcon, QFontMetrics, QPen, QPolygon, QIntValidator
@@ -198,6 +201,161 @@ def _save_settings(s):
 
 _settings = _load_settings()
 C = dict(THEMES.get(_settings.get("theme", "Catppuccin Mocha"), THEMES["Catppuccin Mocha"]))
+
+_DESKTOP_MODE = False
+
+
+# ---------------------------------------------------------------------------
+# Platform Abstraction Layer for Desktop Mode
+# ---------------------------------------------------------------------------
+class DesktopBackend:
+    @staticmethod
+    def create():
+        if sys.platform == 'linux':
+            session = os.environ.get('XDG_SESSION_TYPE', 'x11')
+            if session == 'wayland':
+                return _WaylandDesktopBackend()
+            return _X11DesktopBackend()
+        elif sys.platform == 'win32':
+            return _WindowsDesktopBackend()
+        elif sys.platform == 'darwin':
+            return _MacDesktopBackend()
+        return _FallbackDesktopBackend()
+
+    def setup_window(self, window):
+        raise NotImplementedError
+
+    def get_available_geometry(self):
+        return QApplication.primaryScreen().availableGeometry()
+
+    def get_full_geometry(self):
+        return QApplication.primaryScreen().geometry()
+
+    @property
+    def name(self):
+        return "Unknown"
+
+
+class _X11DesktopBackend(DesktopBackend):
+    @property
+    def name(self):
+        return "X11"
+
+    def setup_window(self, window):
+        window.setWindowFlags(
+            Qt.FramelessWindowHint
+            | Qt.WindowStaysOnBottomHint
+            | Qt.Tool
+        )
+        window.setAttribute(Qt.WA_X11NetWmWindowTypeDesktop, True)
+        window.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        geo = self.get_full_geometry()
+        window.setGeometry(geo)
+        QTimer.singleShot(100, lambda: self._set_x11_hints(window))
+
+    def _set_x11_hints(self, window):
+        try:
+            result = subprocess.run(
+                ["xprop", "-id", str(int(window.winId())),
+                 "-f", "_NET_WM_WINDOW_TYPE", "32a",
+                 "-set", "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_DESKTOP"],
+                capture_output=True, timeout=3
+            )
+        except Exception:
+            pass
+
+
+class _WaylandDesktopBackend(DesktopBackend):
+    @property
+    def name(self):
+        return "Wayland"
+
+    def setup_window(self, window):
+        window.setWindowFlags(
+            Qt.FramelessWindowHint
+            | Qt.WindowStaysOnBottomHint
+        )
+        window.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        geo = self.get_full_geometry()
+        window.setGeometry(geo)
+
+
+class _WindowsDesktopBackend(DesktopBackend):
+    @property
+    def name(self):
+        return "Windows"
+
+    def setup_window(self, window):
+        window.setWindowFlags(
+            Qt.FramelessWindowHint
+            | Qt.WindowStaysOnBottomHint
+            | Qt.Tool
+        )
+        window.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        geo = self.get_full_geometry()
+        window.setGeometry(geo)
+        QTimer.singleShot(200, lambda: self._embed_in_desktop(window))
+
+    def _embed_in_desktop(self, window):
+        try:
+            user32 = ctypes.windll.user32
+            progman = user32.FindWindowW("Progman", None)
+            user32.SendMessageTimeoutW(progman, 0x052C, 0, 0, 0x0, 1000, ctypes.byref(ctypes.c_ulong()))
+            workerw = 0
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            def enum_cb(hwnd, lparam):
+                nonlocal workerw
+                p = ctypes.c_void_p()
+                user32.FindWindowExW(hwnd, 0, "SHELLDLL_DefView", None)
+                if user32.FindWindowExW(hwnd, 0, "SHELLDLL_DefView", None):
+                    workerw = user32.FindWindowExW(0, hwnd, "WorkerW", None)
+                return True
+
+            user32.EnumWindows(enum_cb, 0)
+            if workerw:
+                user32.SetParent(int(window.winId()), workerw)
+        except Exception:
+            pass
+
+
+class _MacDesktopBackend(DesktopBackend):
+    @property
+    def name(self):
+        return "macOS"
+
+    def setup_window(self, window):
+        window.setWindowFlags(
+            Qt.FramelessWindowHint
+            | Qt.WindowStaysOnBottomHint
+            | Qt.Tool
+        )
+        window.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        geo = self.get_full_geometry()
+        window.setGeometry(geo)
+        try:
+            import objc
+            ns_view = int(window.winId())
+            ns_window = objc.objc_msgSend(ns_view, objc.sel_registerName("window"))
+            kCGDesktopWindowLevel = -2147483623
+            objc.objc_msgSend(ns_window, objc.sel_registerName("setLevel:"), kCGDesktopWindowLevel)
+        except Exception:
+            pass
+
+
+class _FallbackDesktopBackend(DesktopBackend):
+    @property
+    def name(self):
+        return "Fallback"
+
+    def setup_window(self, window):
+        window.setWindowFlags(
+            Qt.FramelessWindowHint
+            | Qt.WindowStaysOnBottomHint
+        )
+        geo = self.get_full_geometry()
+        window.setGeometry(geo)
+
 
 _HOLIDAY_CACHE = {}
 _HOLIDAY_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".holiday_cache")
@@ -4107,6 +4265,7 @@ class _SelectionOverlay(QWidget):
 
 class GridPanel(QWidget):
     data_changed = pyqtSignal()
+    desktop_ctx_menu_requested = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -4201,6 +4360,15 @@ class GridPanel(QWidget):
         self._overlay.group_bounds = gbs
         self._overlay.raise_()
         self._overlay.update()
+
+    def contextMenuEvent(self, e):
+        child = self.childAt(e.pos())
+        comp = self._find_comp(child) if child and child is not self._overlay else None
+        if comp is None and _DESKTOP_MODE:
+            self.desktop_ctx_menu_requested.emit(e.globalPos())
+            e.accept()
+            return
+        super().contextMenuEvent(e)
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
@@ -5333,23 +5501,34 @@ class PanelTabBar(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(Qt.FramelessWindowHint)
-        self.setWindowTitle("FastPanel — 组件管理器")
+        self._desktop_mode = _DESKTOP_MODE
+        self._desktop_backend = None
+        self.setWindowTitle("FastPanel")
         _icon_path = os.path.join(_BASE_DIR, "fastpanel.svg")
         if os.path.isfile(_icon_path):
             self.setWindowIcon(QIcon(_icon_path))
-        self.setMinimumSize(960, 640); self.resize(1200, 800)
         self._panels_data = []; self._grids = []; self._scrolls = []; self._active = 0
         self._locked = False
         self._tb_dragging = False; self._tb_offset = QPoint()
+
+        if self._desktop_mode:
+            self._desktop_backend = DesktopBackend.create()
+            self._desktop_backend.setup_window(self)
+        else:
+            self.setWindowFlags(Qt.FramelessWindowHint)
+            self.setMinimumSize(960, 640); self.resize(1200, 800)
+
         self._build_ui(); self._apply_style(); self._load_data()
         if not self._panels_data:
             self._create_panel("默认"); self._switch_panel(0)
+        if self._desktop_mode:
+            self._setup_tray()
 
     def _build_ui(self):
         cw = QWidget(); self.setCentralWidget(cw)
         root = QVBoxLayout(cw); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
 
+        # Toolbar (hidden in desktop mode)
         tb = QFrame(); tb.setObjectName("toolbar"); tb.setFixedHeight(48)
         self._toolbar = tb
         tl = QHBoxLayout(tb); tl.setContentsMargins(16,0,8,0); tl.setSpacing(8)
@@ -5371,28 +5550,35 @@ class MainWindow(QMainWindow):
         sb.clicked.connect(self._on_settings); tl.addWidget(sb)
         ab = QPushButton("＋  新建组件"); ab.setObjectName("addBtn"); ab.setCursor(Qt.PointingHandCursor)
         ab.clicked.connect(self._on_add); tl.addWidget(ab)
-        for txt, oid, slot in [("—", "winMinBtn", self.showMinimized),
-                                ("", "winMaxBtn", self._toggle_max),
-                                ("✕", "winCloseBtn", self.close)]:
-            b = QPushButton(txt); b.setObjectName(oid); b.setFixedSize(36, 28)
-            b.setCursor(Qt.PointingHandCursor); b.clicked.connect(slot); tl.addWidget(b)
-            if oid == "winMaxBtn": self._max_btn = b
-        self._max_btn._is_restore = False
-        _orig_paint = self._max_btn.paintEvent
-        def _max_paint(event):
-            _orig_paint(event)
-            pp = QPainter(self._max_btn)
-            pp.setRenderHint(QPainter.Antialiasing)
-            pen = QPen(QColor(C['subtext0']), 1.2)
-            pp.setPen(pen); pp.setBrush(Qt.NoBrush)
-            if self._max_btn._is_restore:
-                pp.drawRect(15, 6, 10, 10)
-                pp.drawRect(11, 11, 10, 10)
-            else:
-                pp.drawRect(12, 8, 12, 12)
-            pp.end()
-        self._max_btn.paintEvent = _max_paint
-        root.addWidget(tb)
+
+        self._max_btn = None
+        if not self._desktop_mode:
+            for txt, oid, slot in [("—", "winMinBtn", self.showMinimized),
+                                    ("", "winMaxBtn", self._toggle_max),
+                                    ("✕", "winCloseBtn", self.close)]:
+                b = QPushButton(txt); b.setObjectName(oid); b.setFixedSize(36, 28)
+                b.setCursor(Qt.PointingHandCursor); b.clicked.connect(slot); tl.addWidget(b)
+                if oid == "winMaxBtn": self._max_btn = b
+            self._max_btn._is_restore = False
+            _orig_paint = self._max_btn.paintEvent
+            def _max_paint(event):
+                _orig_paint(event)
+                pp = QPainter(self._max_btn)
+                pp.setRenderHint(QPainter.Antialiasing)
+                pen = QPen(QColor(C['subtext0']), 1.2)
+                pp.setPen(pen); pp.setBrush(Qt.NoBrush)
+                if self._max_btn._is_restore:
+                    pp.drawRect(15, 6, 10, 10)
+                    pp.drawRect(11, 11, 10, 10)
+                else:
+                    pp.drawRect(12, 8, 12, 12)
+                pp.end()
+            self._max_btn.paintEvent = _max_paint
+
+        if self._desktop_mode:
+            tb.hide()
+        else:
+            root.addWidget(tb)
 
         self._stack = QStackedWidget(); root.addWidget(self._stack, 1)
 
@@ -5408,9 +5594,13 @@ class MainWindow(QMainWindow):
         self._tab_bar.copy_requested.connect(self._on_copy_panel)
         self._tab_bar.autohide_toggled.connect(self._toggle_tab_autohide)
         tcl.addWidget(self._tab_bar)
-        root.addWidget(self._tab_bar_container)
 
-        self._tab_autohide = False
+        if self._desktop_mode:
+            self._tab_bar_container.hide()
+        else:
+            root.addWidget(self._tab_bar_container)
+
+        self._tab_autohide = self._desktop_mode
         self._tab_hover_zone = QWidget(cw)
         self._tab_hover_zone.setFixedHeight(4)
         self._tab_hover_zone.setStyleSheet(f"background: {C['surface0']};")
@@ -5496,11 +5686,121 @@ class MainWindow(QMainWindow):
             #winCloseBtn:hover {{ background: {C['red']}; color: {C['crust']}; }}
         """)
 
+    # ---- System Tray (desktop mode) ----
+    def _setup_tray(self):
+        self._tray = QSystemTrayIcon(self)
+        _icon_path = os.path.join(_BASE_DIR, "fastpanel.svg")
+        if os.path.isfile(_icon_path):
+            self._tray.setIcon(QIcon(_icon_path))
+        else:
+            self._tray.setIcon(self.style().standardIcon(self.style().SP_ComputerIcon))
+        tray_menu = QMenu()
+        tray_menu.setStyleSheet(self._ctx_menu_style())
+        show_act = tray_menu.addAction("显示/隐藏桌面")
+        show_act.triggered.connect(self._toggle_visibility)
+        tray_menu.addSeparator()
+        add_act = tray_menu.addAction("新建组件")
+        add_act.triggered.connect(self._on_add)
+        settings_act = tray_menu.addAction("设置")
+        settings_act.triggered.connect(self._on_settings)
+        tray_menu.addSeparator()
+        lock_act = tray_menu.addAction("锁定布局" if not self._locked else "解锁布局")
+        lock_act.triggered.connect(self._toggle_lock)
+        self._tray_lock_act = lock_act
+        tray_menu.addSeparator()
+        quit_act = tray_menu.addAction("退出 FastPanel")
+        quit_act.triggered.connect(self._quit_app)
+        self._tray.setContextMenu(tray_menu)
+        self._tray.activated.connect(self._on_tray_activated)
+        self._tray.show()
+
+    def _toggle_visibility(self):
+        if self.isVisible():
+            self.hide()
+        else:
+            self.show()
+            if self._desktop_mode and self._desktop_backend:
+                self._desktop_backend.setup_window(self)
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.DoubleClick:
+            self._toggle_visibility()
+
+    def _quit_app(self):
+        self._save_data()
+        if hasattr(self, '_tray'):
+            self._tray.hide()
+        QApplication.instance().quit()
+
+    # ---- Desktop right-click context menu ----
+    def _ctx_menu_style(self):
+        return f"""
+            QMenu {{
+                background: {C['surface0']}; color: {C['text']};
+                border: 1px solid {C['surface1']}; border-radius: 8px;
+                padding: 6px 4px; font-size: 13px;
+            }}
+            QMenu::item {{
+                padding: 8px 28px 8px 16px; border-radius: 4px; margin: 2px 4px;
+            }}
+            QMenu::item:selected {{ background: {C['blue']}; color: {C['crust']}; }}
+            QMenu::separator {{ height: 1px; background: {C['surface1']}; margin: 4px 8px; }}
+        """
+
+    def _show_desktop_ctx_menu(self, pos):
+        menu = QMenu(self)
+        menu.setStyleSheet(self._ctx_menu_style())
+
+        add_act = menu.addAction("＋  新建组件")
+        add_act.triggered.connect(self._on_add)
+        menu.addSeparator()
+
+        panel_menu = menu.addMenu("面板")
+        panel_menu.setStyleSheet(self._ctx_menu_style())
+        for i, pd in enumerate(self._panels_data):
+            act = panel_menu.addAction(("● " if i == self._active else "    ") + pd.name)
+            act.triggered.connect(lambda checked, idx=i: self._switch_panel(idx))
+        panel_menu.addSeparator()
+        add_panel_act = panel_menu.addAction("＋  新建面板")
+        add_panel_act.triggered.connect(self._on_add_panel)
+        if len(self._panels_data) > 1:
+            rename_act = panel_menu.addAction("✏  重命名当前面板")
+            rename_act.triggered.connect(lambda: self._on_rename_panel(self._active))
+            del_act = panel_menu.addAction("🗑  删除当前面板")
+            del_act.triggered.connect(lambda: self._on_delete_panel(self._active))
+        copy_act = panel_menu.addAction("📋  复制当前面板")
+        copy_act.triggered.connect(lambda: self._on_copy_panel(self._active))
+
+        menu.addSeparator()
+        grid_act = menu.addAction("隐藏网格" if _settings.get("show_grid", True) else "显示网格")
+        grid_act.triggered.connect(self._toggle_grid)
+        lock_act = menu.addAction("解锁布局" if self._locked else "锁定布局")
+        lock_act.triggered.connect(self._toggle_lock)
+
+        menu.addSeparator()
+        imp_act = menu.addAction("📥  导入")
+        imp_act.triggered.connect(self._on_import)
+        exp_act = menu.addAction("📤  导出")
+        exp_act.triggered.connect(self._on_export)
+
+        menu.addSeparator()
+        settings_act = menu.addAction("⚙  设置")
+        settings_act.triggered.connect(self._on_settings)
+
+        menu.addSeparator()
+        quit_act = menu.addAction("退出 FastPanel")
+        quit_act.triggered.connect(self._quit_app)
+
+        menu.exec_(pos)
+
     def _create_panel(self, name, pd=None):
         pd = pd or PanelData(name=name); self._panels_data.append(pd)
         sc = QScrollArea(); sc.setWidgetResizable(False)
         sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        g = GridPanel(); g.data_changed.connect(self._on_data_changed); sc.setWidget(g)
+        g = GridPanel(); g.data_changed.connect(self._on_data_changed)
+        if self._desktop_mode:
+            g.desktop_ctx_menu_requested.connect(self._show_desktop_ctx_menu)
+        sc.setWidget(g)
         self._grids.append(g); self._scrolls.append(sc); self._stack.addWidget(sc)
         idx = self._tab_bar.add_tab(name)
         for cd in pd.components: g.add_component(cd)
@@ -5765,13 +6065,15 @@ class MainWindow(QMainWindow):
             self._tab_hover_zone.hide()
 
     def _toggle_max(self):
+        if self._desktop_mode:
+            return
         if self.isMaximized():
             self.showNormal()
-            self._max_btn._is_restore = False
+            if self._max_btn: self._max_btn._is_restore = False
         else:
             self.showMaximized()
-            self._max_btn._is_restore = True
-        self._max_btn.update()
+            if self._max_btn: self._max_btn._is_restore = True
+        if self._max_btn: self._max_btn.update()
 
     def _toggle_grid(self):
         show = not _settings.get("show_grid", True)
@@ -5786,10 +6088,13 @@ class MainWindow(QMainWindow):
 
     def _toggle_lock(self):
         self._locked = not self._locked
-        self._lock_btn.setText("🔒" if self._locked else "🔓")
-        self._lock_btn.setProperty("locked", self._locked)
-        self._lock_btn.style().unpolish(self._lock_btn)
-        self._lock_btn.style().polish(self._lock_btn)
+        if not self._desktop_mode:
+            self._lock_btn.setText("🔒" if self._locked else "🔓")
+            self._lock_btn.setProperty("locked", self._locked)
+            self._lock_btn.style().unpolish(self._lock_btn)
+            self._lock_btn.style().polish(self._lock_btn)
+        if hasattr(self, '_tray_lock_act'):
+            self._tray_lock_act.setText("解锁布局" if self._locked else "锁定布局")
         for g in self._grids:
             for w in g.components:
                 w.setProperty("locked", self._locked)
@@ -5813,6 +6118,8 @@ class MainWindow(QMainWindow):
                 g.update()
 
     def mousePressEvent(self, e):
+        if self._desktop_mode:
+            super().mousePressEvent(e); return
         if e.button() == Qt.LeftButton and self._toolbar.geometry().contains(e.pos()):
             self._tb_dragging = True
             self._tb_offset = e.globalPos() - self.frameGeometry().topLeft()
@@ -5821,11 +6128,14 @@ class MainWindow(QMainWindow):
             super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
+        if self._desktop_mode:
+            super().mouseMoveEvent(e); return
         if self._tb_dragging:
             if self.isMaximized():
                 ratio = e.pos().x() / self.width()
                 self.showNormal()
-                self._max_btn._is_restore = False; self._max_btn.update()
+                if self._max_btn:
+                    self._max_btn._is_restore = False; self._max_btn.update()
                 new_x = int(self.width() * ratio)
                 self._tb_offset = QPoint(new_x, e.pos().y())
             self.move(e.globalPos() - self._tb_offset)
@@ -5838,18 +6148,38 @@ class MainWindow(QMainWindow):
         super().mouseReleaseEvent(e)
 
     def mouseDoubleClickEvent(self, e):
+        if self._desktop_mode:
+            super().mouseDoubleClickEvent(e); return
         if self._toolbar.geometry().contains(e.pos()):
             self._toggle_max()
         else:
             super().mouseDoubleClickEvent(e)
 
-    def closeEvent(self, e): self._save_data(); super().closeEvent(e)
+    def closeEvent(self, e):
+        self._save_data()
+        if hasattr(self, '_tray'):
+            self._tray.hide()
+        super().closeEvent(e)
 
 
 def main():
+    parser = argparse.ArgumentParser(description="FastPanel — Desktop Widget Engine")
+    parser.add_argument("--windowed", action="store_true", help="以窗口模式运行（默认为桌面模式）")
+    parser.add_argument("--desktop", action="store_true", help="强制桌面模式")
+    args = parser.parse_args()
+
+    global _DESKTOP_MODE
+    if args.windowed:
+        _DESKTOP_MODE = False
+    elif args.desktop:
+        _DESKTOP_MODE = True
+    else:
+        _DESKTOP_MODE = True
+
     os.environ.setdefault("QT_IM_MODULE", "fcitx")
     app = QApplication(sys.argv)
     app.setDesktopFileName("fastpanel")
+    app.setQuitOnLastWindowClosed(not _DESKTOP_MODE)
     font = QFont(); font.setFamily("Noto Sans CJK SC"); font.setPointSize(10); app.setFont(font)
     app.setStyle("Fusion")
     app.setStyleSheet(f"""
@@ -5859,8 +6189,13 @@ def main():
             padding: 4px 8px; font-size: 12px;
         }}
     """)
-    win = MainWindow(); win.showMaximized()
-    if hasattr(win, '_max_btn'): win._max_btn._is_restore = True; win._max_btn.update()
+    win = MainWindow()
+    if _DESKTOP_MODE:
+        win.show()
+    else:
+        win.showMaximized()
+        if win._max_btn:
+            win._max_btn._is_restore = True; win._max_btn.update()
     sys.exit(app.exec_())
 
 
