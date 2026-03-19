@@ -226,10 +226,19 @@ class DesktopBackend:
         raise NotImplementedError
 
     def get_available_geometry(self):
-        return QApplication.primaryScreen().availableGeometry()
+        screens = QApplication.screens()
+        if len(screens) <= 1:
+            return QApplication.primaryScreen().availableGeometry()
+        union = QRect()
+        for s in screens:
+            union = union.united(s.availableGeometry())
+        return union
 
     def get_full_geometry(self):
-        return QApplication.primaryScreen().geometry()
+        return QApplication.primaryScreen().virtualGeometry()
+
+    def get_screens_info(self):
+        return [(s.name(), s.geometry(), s.availableGeometry()) for s in QApplication.screens()]
 
     @property
     def name(self):
@@ -249,7 +258,7 @@ class _X11DesktopBackend(DesktopBackend):
         )
         window.setAttribute(Qt.WA_X11NetWmWindowTypeDesktop, True)
         window.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        geo = self.get_full_geometry()
+        geo = self.get_available_geometry()
         window.setGeometry(geo)
         QTimer.singleShot(100, lambda: self._set_x11_hints(window))
 
@@ -276,7 +285,7 @@ class _WaylandDesktopBackend(DesktopBackend):
             | Qt.WindowStaysOnBottomHint
         )
         window.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        geo = self.get_full_geometry()
+        geo = self.get_available_geometry()
         window.setGeometry(geo)
 
 
@@ -292,7 +301,7 @@ class _WindowsDesktopBackend(DesktopBackend):
             | Qt.Tool
         )
         window.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        geo = self.get_full_geometry()
+        geo = self.get_available_geometry()
         window.setGeometry(geo)
         QTimer.singleShot(200, lambda: self._embed_in_desktop(window))
 
@@ -331,7 +340,7 @@ class _MacDesktopBackend(DesktopBackend):
             | Qt.Tool
         )
         window.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        geo = self.get_full_geometry()
+        geo = self.get_available_geometry()
         window.setGeometry(geo)
         try:
             import objc
@@ -353,7 +362,7 @@ class _FallbackDesktopBackend(DesktopBackend):
             Qt.FramelessWindowHint
             | Qt.WindowStaysOnBottomHint
         )
-        geo = self.get_full_geometry()
+        geo = self.get_available_geometry()
         window.setGeometry(geo)
 
 
