@@ -1,0 +1,1 @@
+"""FastPanel - Desktop Widget Engine"""
