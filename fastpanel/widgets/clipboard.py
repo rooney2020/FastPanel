@@ -1,4 +1,5 @@
 import subprocess
+import sip
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QScrollArea, QApplication, QGraphicsDropShadowEffect
@@ -18,6 +19,7 @@ class _ClipboardMonitor:
     _instance = None
     history = []
     img_history = []
+    all_items = []          # unified list: ('text', str) | ('image', QPixmap)
     MAX_TEXT = 30
     MAX_IMG = 10
 
@@ -26,6 +28,12 @@ class _ClipboardMonitor:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
+
+    @classmethod
+    def clear_all(cls):
+        cls.history.clear()
+        cls.img_history.clear()
+        cls.all_items.clear()
 
     def __init__(self):
         self._last_text = ""
@@ -47,16 +55,30 @@ class _ClipboardMonitor:
                     pm = QPixmap.fromImage(img)
                     _ClipboardMonitor.img_history.insert(0, pm)
                     if len(_ClipboardMonitor.img_history) > self.MAX_IMG:
-                        _ClipboardMonitor.img_history = _ClipboardMonitor.img_history[:self.MAX_IMG]
+                        removed = _ClipboardMonitor.img_history.pop()
+                        try:
+                            _ClipboardMonitor.all_items.remove(('image', removed))
+                        except ValueError:
+                            pass
+                    _ClipboardMonitor.all_items.insert(0, ('image', pm))
                     return
         text = cb.text()
         if text and text != self._last_text:
             self._last_text = text
             if text in _ClipboardMonitor.history:
                 _ClipboardMonitor.history.remove(text)
+                try:
+                    _ClipboardMonitor.all_items.remove(('text', text))
+                except ValueError:
+                    pass
             _ClipboardMonitor.history.insert(0, text)
             if len(_ClipboardMonitor.history) > self.MAX_TEXT:
-                _ClipboardMonitor.history = _ClipboardMonitor.history[:self.MAX_TEXT]
+                removed = _ClipboardMonitor.history.pop()
+                try:
+                    _ClipboardMonitor.all_items.remove(('text', removed))
+                except ValueError:
+                    pass
+            _ClipboardMonitor.all_items.insert(0, ('text', text))
 
 
 class ClipboardWidget(CompBase):
@@ -95,48 +117,55 @@ class ClipboardWidget(CompBase):
         clr.clicked.connect(self._clear)
         hdr.addWidget(clr)
         lay.addLayout(hdr)
-        sc = QScrollArea(); sc.setWidgetResizable(True)
-        sc.setStyleSheet(f"QScrollArea{{background:transparent;border:none;}}QScrollArea > QWidget{{background:transparent;}}{_scrollbar_style(6)}")
-        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll = QScrollArea(); self._scroll.setWidgetResizable(True)
+        self._scroll.setStyleSheet(f"QScrollArea{{background:transparent;border:none;}}QScrollArea > QWidget{{background:transparent;}}{_scrollbar_style(6)}")
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._list_w = QWidget()
         self._list_w.setStyleSheet("background:transparent;")
         self._list_lay = QVBoxLayout(self._list_w); self._list_lay.setContentsMargins(0, 0, 0, 0)
         self._list_lay.setSpacing(4); self._list_lay.addStretch()
-        sc.setWidget(self._list_w)
-        lay.addWidget(sc)
+        self._scroll.setWidget(self._list_w)
+        lay.addWidget(self._scroll)
 
     def _rebuild(self):
-        while self._list_lay.count() > 1:
-            item = self._list_lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        for child in list(self._list_w.findChildren(QWidget)):
+            if not sip.isdeleted(child):
+                sip.delete(child)
+        QWidget().setLayout(self._list_lay)
+        self._list_lay = QVBoxLayout(self._list_w)
+        self._list_lay.setContentsMargins(0, 0, 0, 0)
+        self._list_lay.setSpacing(4); self._list_lay.addStretch()
         idx = 0
-        for pm in _ClipboardMonitor.img_history:
-            frame = QFrame()
-            frame.setCursor(Qt.PointingHandCursor)
-            frame.setStyleSheet(f"QFrame{{background:{_bg('surface0')};border-radius:6px;padding:4px;}}"
-                                f"QFrame:hover{{background:{_bg('surface1')};}}")
-            fl = QHBoxLayout(frame); fl.setContentsMargins(6, 4, 6, 4); fl.setSpacing(6)
-            thumb = QLabel()
-            scaled = pm.scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            thumb.setPixmap(scaled)
-            thumb.setStyleSheet("background:transparent;")
-            fl.addWidget(thumb)
-            info = QLabel(f"🖼 图片 {pm.width()}×{pm.height()}")
-            info.setStyleSheet(f"color:{C['text']};font-size:10px;background:transparent;")
-            fl.addWidget(info, 1)
-            frame.mousePressEvent = lambda e, p=pm: self._paste_image(p)
-            self._list_lay.insertWidget(idx, frame); idx += 1
-        for text in _ClipboardMonitor.history:
-            preview = text[:80].replace('\n', ' ')
-            btn = QPushButton(preview); btn.setCursor(Qt.PointingHandCursor)
-            btn.setToolTip(text[:300])
-            btn.setStyleSheet(f"""QPushButton {{
-                background:{_bg('surface0')};color:{C['text']};border:none;border-radius:6px;
-                text-align:left;padding:6px 8px;font-size:11px;}}
-                QPushButton:hover {{background:{_bg('surface1')};}}""")
-            btn.clicked.connect(lambda _, t=text: self._paste_text(t))
-            self._list_lay.insertWidget(idx, btn); idx += 1
+        for kind, data in _ClipboardMonitor.all_items:
+            if kind == 'image':
+                pm = data
+                frame = QFrame()
+                frame.setCursor(Qt.PointingHandCursor)
+                frame.setStyleSheet(f"QFrame{{background:{_bg('surface0')};border-radius:6px;padding:4px;}}"
+                                    f"QFrame:hover{{background:{_bg('surface1')};}}")
+                fl = QHBoxLayout(frame); fl.setContentsMargins(6, 4, 6, 4); fl.setSpacing(6)
+                thumb = QLabel()
+                scaled = pm.scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                thumb.setPixmap(scaled)
+                thumb.setStyleSheet("background:transparent;")
+                fl.addWidget(thumb)
+                info = QLabel(f"🖼 图片 {pm.width()}×{pm.height()}")
+                info.setStyleSheet(f"color:{C['text']};font-size:10px;background:transparent;")
+                fl.addWidget(info, 1)
+                frame.mousePressEvent = lambda e, p=pm: self._paste_image(p)
+                self._list_lay.insertWidget(idx, frame)
+            else:
+                text = data
+                preview = text[:80].replace('\n', ' ')
+                btn = QPushButton(preview); btn.setCursor(Qt.PointingHandCursor)
+                btn.setToolTip(text[:300])
+                btn.setStyleSheet(f"""QPushButton {{
+                    background:{_bg('surface0')};color:{C['text']};border:none;border-radius:6px;
+                    text-align:left;padding:6px 8px;font-size:11px;}}
+                    QPushButton:hover {{background:{_bg('surface1')};}}""")
+                btn.clicked.connect(lambda _, t=text: self._paste_text(t))
+                self._list_lay.insertWidget(idx, btn)
+            idx += 1
         self._cnt_lbl.setText(f"文本 {len(_ClipboardMonitor.history)} · 图片 {len(_ClipboardMonitor.img_history)}")
 
     def _paste_text(self, text):
@@ -146,8 +175,7 @@ class ClipboardWidget(CompBase):
         QApplication.clipboard().setPixmap(pm)
 
     def _clear(self):
-        _ClipboardMonitor.history.clear()
-        _ClipboardMonitor.img_history.clear()
+        _ClipboardMonitor.clear_all()
         self._rebuild()
 
 
@@ -199,26 +227,31 @@ class _ClipboardPopup(QWidget):
         count_lbl.setStyleSheet(f"color:{C['subtext0']};font-size:11px;background:transparent;")
         header.addWidget(count_lbl)
         self._count_lbl = count_lbl
+        clr_btn = QPushButton("清空"); clr_btn.setCursor(Qt.PointingHandCursor)
+        clr_btn.setStyleSheet(f"background:{_bg('surface1')};color:{C['red']};border:none;border-radius:8px;"
+                              f"font-size:11px;padding:4px 12px;")
+        clr_btn.clicked.connect(self._clear_all)
+        header.addWidget(clr_btn)
         lay.addLayout(header)
 
         sep = QFrame(); sep.setFrameShape(QFrame.HLine)
         sep.setStyleSheet(f"background:{C['surface0']};border:none;max-height:1px;")
         lay.addWidget(sep)
 
-        sc = QScrollArea(); sc.setWidgetResizable(True)
-        sc.setFixedHeight(400)
-        sc.setStyleSheet(f"QScrollArea{{background:transparent;border:none;}}"
+        self._scroll = QScrollArea(); self._scroll.setWidgetResizable(True)
+        self._scroll.setFixedHeight(400)
+        self._scroll.setStyleSheet(f"QScrollArea{{background:transparent;border:none;}}"
                          f"QScrollArea>QWidget{{background:transparent;}}"
                          f"{_scrollbar_style(6)}")
-        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._list_w = QWidget()
         self._list_w.setStyleSheet("background:transparent;")
         self._list_lay = QVBoxLayout(self._list_w)
         self._list_lay.setContentsMargins(0, 0, 0, 0)
         self._list_lay.setSpacing(4)
         self._list_lay.addStretch()
-        sc.setWidget(self._list_w)
-        lay.addWidget(sc)
+        self._scroll.setWidget(self._list_w)
+        lay.addWidget(self._scroll)
 
         hint = QLabel("选择条目即可粘贴  ·  按 Esc 关闭")
         hint.setAlignment(Qt.AlignCenter)
@@ -226,57 +259,68 @@ class _ClipboardPopup(QWidget):
         lay.addWidget(hint)
 
     def _rebuild(self):
-        while self._list_lay.count() > 1:
-            item = self._list_lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        for child in list(self._list_w.findChildren(QWidget)):
+            if not sip.isdeleted(child):
+                sip.delete(child)
+        QWidget().setLayout(self._list_lay)
+        self._list_lay = QVBoxLayout(self._list_w)
+        self._list_lay.setContentsMargins(0, 0, 0, 0)
+        self._list_lay.setSpacing(4)
+        self._list_lay.addStretch()
         idx = 0
-        total = len(_ClipboardMonitor.img_history) + len(_ClipboardMonitor.history)
+        total = len(_ClipboardMonitor.all_items)
         self._count_lbl.setText(f"{total} 条记录")
 
-        for pm in _ClipboardMonitor.img_history:
-            frame = QFrame(); frame.setCursor(Qt.PointingHandCursor)
-            frame.setStyleSheet(f"""QFrame{{background:{C['surface0']};border-radius:8px;}}
-                QFrame:hover{{background:{C['surface1']};border:1px solid {C['blue']};}}""")
-            fl = QHBoxLayout(frame); fl.setContentsMargins(8, 6, 8, 6); fl.setSpacing(8)
-            thumb = QLabel()
-            scaled = pm.scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            thumb.setPixmap(scaled)
-            thumb.setStyleSheet("background:transparent;border-radius:4px;")
-            fl.addWidget(thumb)
-            info_lay = QVBoxLayout(); info_lay.setSpacing(1)
-            info = QLabel(f"图片  {pm.width()}×{pm.height()}")
-            info.setStyleSheet(f"color:{C['text']};font-size:11px;background:transparent;")
-            info_lay.addWidget(info)
-            tag = QLabel("🖼 图像")
-            tag.setStyleSheet(f"color:{C['subtext0']};font-size:9px;background:transparent;")
-            info_lay.addWidget(tag)
-            fl.addLayout(info_lay, 1)
-            frame.mousePressEvent = lambda e, p=pm: self._pick_image(p)
-            self._list_lay.insertWidget(idx, frame); idx += 1
-
-        for text in _ClipboardMonitor.history:
-            preview = text[:120].replace(chr(10), " ↵ ")
-            frame = QFrame(); frame.setCursor(Qt.PointingHandCursor)
-            frame.setStyleSheet(f"""QFrame{{background:{C['surface0']};border-radius:8px;padding:8px 10px;}}
-                QFrame:hover{{background:{C['surface1']};border:1px solid {C['blue']};}}""")
-            fl = QVBoxLayout(frame); fl.setContentsMargins(10, 8, 10, 8); fl.setSpacing(2)
-            lbl = QLabel(preview)
-            lbl.setWordWrap(True)
-            lbl.setStyleSheet(f"color:{C['text']};font-size:12px;background:transparent;")
-            fl.addWidget(lbl)
-            if len(text) > 120:
-                more = QLabel(f"…共 {len(text)} 字符")
-                more.setStyleSheet(f"color:{C['overlay0']};font-size:9px;background:transparent;")
-                fl.addWidget(more)
-            frame.mousePressEvent = lambda e, t=text: self._pick_text(t)
-            self._list_lay.insertWidget(idx, frame); idx += 1
+        for kind, data in _ClipboardMonitor.all_items:
+            if kind == 'image':
+                pm = data
+                frame = QFrame(); frame.setCursor(Qt.PointingHandCursor)
+                frame.setStyleSheet(f"""QFrame{{background:{C['surface0']};border-radius:8px;}}
+                    QFrame:hover{{background:{C['surface1']};border:1px solid {C['blue']};}}""")
+                fl = QHBoxLayout(frame); fl.setContentsMargins(8, 6, 8, 6); fl.setSpacing(8)
+                thumb = QLabel()
+                scaled = pm.scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                thumb.setPixmap(scaled)
+                thumb.setStyleSheet("background:transparent;border-radius:4px;")
+                fl.addWidget(thumb)
+                info_lay = QVBoxLayout(); info_lay.setSpacing(1)
+                info = QLabel(f"图片  {pm.width()}×{pm.height()}")
+                info.setStyleSheet(f"color:{C['text']};font-size:11px;background:transparent;")
+                info_lay.addWidget(info)
+                tag = QLabel("🖼 图像")
+                tag.setStyleSheet(f"color:{C['subtext0']};font-size:9px;background:transparent;")
+                info_lay.addWidget(tag)
+                fl.addLayout(info_lay, 1)
+                frame.mousePressEvent = lambda e, p=pm: self._pick_image(p)
+                self._list_lay.insertWidget(idx, frame)
+            else:
+                text = data
+                preview = text[:120].replace(chr(10), " ↵ ")
+                frame = QFrame(); frame.setCursor(Qt.PointingHandCursor)
+                frame.setStyleSheet(f"""QFrame{{background:{C['surface0']};border-radius:8px;padding:8px 10px;}}
+                    QFrame:hover{{background:{C['surface1']};border:1px solid {C['blue']};}}""")
+                fl = QVBoxLayout(frame); fl.setContentsMargins(10, 8, 10, 8); fl.setSpacing(2)
+                lbl = QLabel(preview)
+                lbl.setWordWrap(True)
+                lbl.setStyleSheet(f"color:{C['text']};font-size:12px;background:transparent;")
+                fl.addWidget(lbl)
+                if len(text) > 120:
+                    more = QLabel(f"…共 {len(text)} 字符")
+                    more.setStyleSheet(f"color:{C['overlay0']};font-size:9px;background:transparent;")
+                    fl.addWidget(more)
+                frame.mousePressEvent = lambda e, t=text: self._pick_text(t)
+                self._list_lay.insertWidget(idx, frame)
+            idx += 1
 
         if total == 0:
             empty = QLabel("剪贴板为空")
             empty.setAlignment(Qt.AlignCenter)
             empty.setStyleSheet(f"color:{C['overlay0']};font-size:13px;padding:40px;background:transparent;")
             self._list_lay.insertWidget(0, empty)
+
+    def _clear_all(self):
+        _ClipboardMonitor.clear_all()
+        self._rebuild()
 
     def _pick_text(self, text):
         QApplication.clipboard().setText(text)

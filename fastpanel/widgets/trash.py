@@ -15,9 +15,17 @@ from fastpanel.widgets.base import CompBase
 from fastpanel.utils import _confirm_dialog
 
 class TrashWidget(CompBase):
+    _VIRTUAL_FS = frozenset([
+        'proc', 'sysfs', 'devtmpfs', 'tmpfs', 'securityfs', 'cgroup', 'cgroup2',
+        'pstore', 'debugfs', 'hugetlbfs', 'mqueue', 'fusectl', 'configfs',
+        'binfmt_misc', 'autofs', 'efivarfs', 'tracefs', 'fuse.portal',
+        'fuse.gvfsd-fuse', 'overlay', 'squashfs', 'nsfs', 'ramfs',
+    ])
+
     def __init__(self, data, parent=None):
         super().__init__(data, parent)
-        self._trash_dir = os.path.expanduser("~/.local/share/Trash")
+        self._uid = os.getuid()
+        self._home_trash = os.path.expanduser("~/.local/share/Trash")
         self._count = 0
         self._size = 0
         self._build_ui()
@@ -52,29 +60,61 @@ class TrashWidget(CompBase):
         btns.addStretch()
         lay.addLayout(btns); lay.addStretch()
 
-    def _refresh(self):
-        files_dir = os.path.join(self._trash_dir, "files")
-        if not os.path.isdir(files_dir):
-            self._count = 0; self._size = 0
-        else:
+    def _get_all_trash_dirs(self):
+        """Return a list of all trash 'files' directories across mount points."""
+        dirs = []
+        home_files = os.path.join(self._home_trash, "files")
+        if os.path.isdir(home_files):
+            dirs.append(home_files)
+        try:
+            with open("/proc/mounts") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) < 3:
+                        continue
+                    mountpoint, fstype = parts[1], parts[2]
+                    if fstype in self._VIRTUAL_FS:
+                        continue
+                    trash_files = os.path.join(mountpoint, f".Trash-{self._uid}", "files")
+                    if trash_files != home_files and os.path.isdir(trash_files):
+                        dirs.append(trash_files)
+        except OSError:
+            pass
+        return dirs
+
+    @staticmethod
+    def _scan_dir_size(files_dir):
+        count = 0
+        total = 0
+        try:
             items = os.listdir(files_dir)
-            self._count = len(items)
-            total = 0
-            for item in items:
-                p = os.path.join(files_dir, item)
-                try:
-                    if os.path.isfile(p):
-                        total += os.path.getsize(p)
-                    elif os.path.isdir(p):
-                        for root, dirs, fs in os.walk(p):
-                            for f in fs:
-                                try:
-                                    total += os.path.getsize(os.path.join(root, f))
-                                except OSError:
-                                    pass
-                except OSError:
-                    pass
-            self._size = total
+        except OSError:
+            return 0, 0
+        count = len(items)
+        for item in items:
+            p = os.path.join(files_dir, item)
+            try:
+                if os.path.isfile(p):
+                    total += os.path.getsize(p)
+                elif os.path.isdir(p):
+                    for root, _dirs, fs in os.walk(p):
+                        for f in fs:
+                            try:
+                                total += os.path.getsize(os.path.join(root, f))
+                            except OSError:
+                                pass
+            except OSError:
+                pass
+        return count, total
+
+    def _refresh(self):
+        all_count, all_size = 0, 0
+        for d in self._get_all_trash_dirs():
+            c, s = self._scan_dir_size(d)
+            all_count += c
+            all_size += s
+        self._count = all_count
+        self._size = all_size
         self._count_lbl.setText(f"{self._count} 个文件")
         self._size_lbl.setText(self._fmt_size(self._size))
 
@@ -98,21 +138,21 @@ class TrashWidget(CompBase):
         try:
             subprocess.run(["gio", "trash", "--empty"], timeout=30, capture_output=True)
         except Exception:
-            files_dir = os.path.join(self._trash_dir, "files")
-            info_dir = os.path.join(self._trash_dir, "info")
-            for d in [files_dir, info_dir]:
-                if os.path.isdir(d):
-                    import shutil
-                    for item in os.listdir(d):
-                        p = os.path.join(d, item)
-                        try:
-                            if os.path.isdir(p):
-                                shutil.rmtree(p)
-                            else:
-                                os.remove(p)
-                        except Exception:
-                            pass
-            self._refresh()
+            for files_dir in self._get_all_trash_dirs():
+                trash_root = os.path.dirname(files_dir)
+                for sub in ["files", "info"]:
+                    d = os.path.join(trash_root, sub)
+                    if os.path.isdir(d):
+                        for item in os.listdir(d):
+                            p = os.path.join(d, item)
+                            try:
+                                if os.path.isdir(p):
+                                    shutil.rmtree(p)
+                                else:
+                                    os.remove(p)
+                            except Exception:
+                                pass
+        self._refresh()
 
     def refresh_theme(self):
         super().refresh_theme()
