@@ -40,13 +40,35 @@ fi
 
 # 3. 安装 Python 依赖
 echo ""
-echo "[3/5] 安装 Python 依赖..."
-pip3 install --user psutil python-xlib 2>/dev/null || pip3 install psutil python-xlib
+echo "[3/6] 安装 Python 依赖..."
+pip3 install --user psutil python-xlib vosk 2>/dev/null || pip3 install psutil python-xlib vosk
 echo "  ✅ Python 依赖已安装"
 
-# 4. 创建桌面入口（应用程序列表）
+# 4. 下载语音识别模型
 echo ""
-echo "[4/5] 添加到应用程序列表..."
+echo "[4/6] 下载语音识别模型（Vosk 中文 ~42MB）..."
+VOSK_MODEL_DIR="$HOME/.fastpanel/vosk-models"
+VOSK_MODEL_NAME="vosk-model-small-cn-0.22"
+if [ -d "$VOSK_MODEL_DIR/$VOSK_MODEL_NAME" ]; then
+    echo "  ✅ 语音模型已存在"
+else
+    mkdir -p "$VOSK_MODEL_DIR"
+    VOSK_ZIP="$VOSK_MODEL_DIR/$VOSK_MODEL_NAME.zip"
+    echo "  下载中..."
+    if curl -L -o "$VOSK_ZIP" "https://alphacephei.com/vosk/models/$VOSK_MODEL_NAME.zip" 2>/dev/null || \
+       wget -O "$VOSK_ZIP" "https://alphacephei.com/vosk/models/$VOSK_MODEL_NAME.zip" 2>/dev/null; then
+        echo "  解压中..."
+        unzip -q -o "$VOSK_ZIP" -d "$VOSK_MODEL_DIR"
+        rm -f "$VOSK_ZIP"
+        echo "  ✅ 语音模型已下载"
+    else
+        echo "  ⚠️ 下载失败，可稍后在 FastPanel 设置中下载"
+    fi
+fi
+
+# 5. 创建桌面入口（应用程序列表）
+echo ""
+echo "[5/6] 添加到应用程序列表..."
 
 DESKTOP_DIR="$HOME/.local/share/applications"
 ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
@@ -81,9 +103,9 @@ echo "  ✅ 已添加到应用程序列表"
 update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
 gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
-# 5. 是否设置开机自启
+# 6. 是否设置开机自启
 echo ""
-read -p "[5/5] 是否设置开机自动启动？(y/N): " AUTOSTART
+read -p "[6/6] 是否设置开机自动启动？(y/N): " AUTOSTART
 if [[ "$AUTOSTART" =~ ^[Yy]$ ]]; then
     AUTOSTART_DIR="$HOME/.config/autostart"
     mkdir -p "$AUTOSTART_DIR"

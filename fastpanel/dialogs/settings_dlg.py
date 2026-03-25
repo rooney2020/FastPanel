@@ -23,10 +23,23 @@ class SettingsDialog(QDialog):
         self.setFixedWidth(480)
         self.setStyleSheet(_dialog_style())
 
-        lay = QVBoxLayout(self); lay.setContentsMargins(28, 24, 28, 24); lay.setSpacing(16)
-        heading = QLabel("⚙  设置"); heading.setObjectName("heading"); lay.addWidget(heading)
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
+        heading = QLabel("⚙  设置"); heading.setObjectName("heading")
+        heading.setContentsMargins(28, 20, 28, 12)
+        lay.addWidget(heading)
 
-        form = QFormLayout(); form.setLabelAlignment(Qt.AlignRight); form.setSpacing(12)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet(f"""
+            QScrollArea {{ background: {C['base']}; border: none; }}
+            QScrollArea > QWidget > QWidget {{ background: {C['base']}; }}
+            {_scrollbar_style()}
+        """)
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet(f"background: {C['base']};")
+        form = QFormLayout(scroll_content); form.setLabelAlignment(Qt.AlignRight); form.setSpacing(12)
+        form.setContentsMargins(28, 0, 28, 16)
 
         self.theme_combo = QComboBox()
         for name in THEMES:
@@ -258,6 +271,7 @@ class SettingsDialog(QDialog):
                 ("锁定切换", "toggle_lock", "_hk_lock"),
                 ("打开设置", "open_settings", "_hk_settings"),
                 ("剪贴板弹出", "clipboard_popup", "_hk_clipboard"),
+                ("语音输入", "voice_input", "_hk_voice"),
             ]
             for label_text, key, attr in _hk_defs:
                 hk_edit = _HotkeyEdit(hotkeys.get(key, ""))
@@ -277,13 +291,45 @@ class SettingsDialog(QDialog):
                 w = QWidget(); w.setLayout(row)
                 form.addRow(label_text, w)
 
-        lay.addLayout(form); lay.addStretch()
-        btns = QHBoxLayout(); btns.addStretch()
+            sep3 = QFrame(); sep3.setFrameShape(QFrame.HLine)
+            sep3.setStyleSheet(f"color: {C['surface1']};")
+            form.addRow(sep3)
+            voice_label = QLabel("语音输入  （Vosk 离线识别，需下载 ~1.2GB 中文模型）")
+            voice_label.setStyleSheet(f"color: {C['subtext0']}; font-size: 11px; padding-top: 4px;")
+            form.addRow("", voice_label)
+
+            from fastpanel.platform.stt import SttEngine
+            model_row = QWidget()
+            model_lay = QHBoxLayout(model_row); model_lay.setContentsMargins(0, 0, 0, 0); model_lay.setSpacing(8)
+            self._voice_model_status = QLabel()
+            self._voice_model_status.setStyleSheet(f"font-size: 12px;")
+            model_lay.addWidget(self._voice_model_status, 1)
+            self._voice_dl_btn = QPushButton()
+            self._voice_dl_btn.setCursor(Qt.PointingHandCursor)
+            self._voice_dl_btn.setFixedHeight(28)
+            model_lay.addWidget(self._voice_dl_btn)
+            form.addRow("语音模型", model_row)
+
+            self._stt_for_dl = SttEngine(self)
+            self._stt_for_dl.model_progress.connect(self._on_voice_dl_progress)
+            self._stt_for_dl.model_ready.connect(self._on_voice_dl_done)
+            self._stt_for_dl.model_error.connect(self._on_voice_dl_error)
+            self._update_voice_model_ui()
+
+        scroll.setWidget(scroll_content)
+        lay.addWidget(scroll, 1)
+
+        btns_w = QWidget()
+        btns_w.setContentsMargins(28, 8, 28, 16)
+        btns = QHBoxLayout(btns_w); btns.addStretch()
         cancel = QPushButton("取消"); cancel.setObjectName("cancelBtn")
         cancel.setCursor(Qt.PointingHandCursor); cancel.clicked.connect(self.reject); btns.addWidget(cancel)
         ok = QPushButton("应  用"); ok.setObjectName("okBtn")
         ok.setCursor(Qt.PointingHandCursor); ok.clicked.connect(self.accept); btns.addWidget(ok)
-        lay.addLayout(btns)
+        lay.addWidget(btns_w)
+
+        max_h = int(QApplication.primaryScreen().availableGeometry().height() * 0.85)
+        self.setMaximumHeight(max_h)
 
     def _preview_theme(self, name):
         self._update_preview_colors(name)
@@ -321,12 +367,60 @@ class SettingsDialog(QDialog):
         if f:
             edit.setText(f)
 
+    def _update_voice_model_ui(self):
+        if self._stt_for_dl.is_model_available():
+            self._voice_model_status.setText("✓ 模型已就绪")
+            self._voice_model_status.setStyleSheet(f"color: {C['green']}; font-size: 12px;")
+            self._voice_dl_btn.setText("重新下载")
+            self._voice_dl_btn.setStyleSheet(f"""
+                QPushButton {{ background: {C['surface1']}; color: {C['text']};
+                    border: none; border-radius: 6px; padding: 4px 12px; font-size: 12px; }}
+                QPushButton:hover {{ background: {C['surface2']}; }}
+            """)
+        else:
+            self._voice_model_status.setText("✗ 模型未下载")
+            self._voice_model_status.setStyleSheet(f"color: {C['red']}; font-size: 12px;")
+            self._voice_dl_btn.setText("下载模型 (~1.2GB)")
+            self._voice_dl_btn.setStyleSheet(f"""
+                QPushButton {{ background: {C['blue']}; color: {C['crust']};
+                    border: none; border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: bold; }}
+                QPushButton:hover {{ background: {C['lavender']}; }}
+            """)
+        self._voice_dl_btn.setEnabled(True)
+        try:
+            self._voice_dl_btn.clicked.disconnect()
+        except TypeError:
+            pass
+        self._voice_dl_btn.clicked.connect(self._on_voice_download)
+
+    def _on_voice_download(self):
+        self._voice_dl_btn.setEnabled(False)
+        self._voice_dl_btn.setText("下载中...")
+        self._voice_model_status.setText("正在下载...")
+        self._voice_model_status.setStyleSheet(f"color: {C['blue']}; font-size: 12px;")
+        self._stt_for_dl.download_model()
+
+    def _on_voice_dl_progress(self, pct):
+        self._voice_model_status.setText(f"下载中... {pct}%")
+        self._voice_model_status.setStyleSheet(f"color: {C['blue']}; font-size: 12px;")
+        self._voice_dl_btn.setEnabled(False)
+        self._voice_dl_btn.setText("下载中...")
+
+    def _on_voice_dl_done(self):
+        self._update_voice_model_ui()
+
+    def _on_voice_dl_error(self, msg):
+        self._voice_model_status.setText(f"✗ {msg}")
+        self._voice_model_status.setStyleSheet(f"color: {C['red']}; font-size: 12px;")
+        self._voice_dl_btn.setEnabled(True)
+        self._voice_dl_btn.setText("重试下载")
+
     def accept(self):
         if _DESKTOP_MODE and hasattr(self, '_hk_toggle'):
             hk_edits = {
                 "显示/隐藏": self._hk_toggle, "新建组件": self._hk_add,
                 "锁定切换": self._hk_lock, "打开设置": self._hk_settings,
-                "剪贴板弹出": self._hk_clipboard,
+                "剪贴板弹出": self._hk_clipboard, "语音输入": self._hk_voice,
             }
             used = {}
             for name, edit in hk_edits.items():
@@ -371,7 +465,9 @@ class SettingsDialog(QDialog):
                 "toggle_lock": self._hk_lock.text().strip(),
                 "open_settings": self._hk_settings.text().strip(),
                 "clipboard_popup": self._hk_clipboard.text().strip(),
+                "voice_input": self._hk_voice.text().strip(),
             }
+        
         if hasattr(self, '_autostart_cb'):
             s["_autostart"] = self._autostart_cb.isChecked()
         return s

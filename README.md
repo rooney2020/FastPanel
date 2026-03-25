@@ -6,6 +6,7 @@
 ![PyQt5](https://img.shields.io/badge/PyQt5-5.15+-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 ![Platform](https://img.shields.io/badge/Platform-Linux%20|%20Windows%20|%20macOS-orange)
+![Version](https://img.shields.io/badge/Version-2.1.0-blue)
 
 ## 截图
 
@@ -139,6 +140,7 @@
 | `Ctrl+Shift+D` | 显示/隐藏桌面 |
 | `Ctrl+Alt+V` | 弹出剪贴板历史（选中可直接粘贴到输入框） |
 | `Ctrl+Shift+S` | 打开设置 |
+| `Ctrl+Shift+V` | 语音输入（需下载语音模型） |
 | 可自定义 | 在设置中点击输入框，弹出捕获窗口自动识别按键组合 |
 
 ### 组件透明度
@@ -239,3 +241,9 @@ FastPanel/
 - Wayland 下全局快捷键不可用（X11 专属功能）
 - 剪贴板粘贴功能依赖 `python-xlib`（X11 环境）
 - macOS 和 Windows 下部分桌面集成功能受限
+- 语音输入功能目前仅支持 Linux 平台
+
+## 更新日志
+
+查看 [CHANGELOG.md](CHANGELOG.md) 了解版本更新历史。
+

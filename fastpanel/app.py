@@ -3,25 +3,40 @@ import os
 import argparse
 
 def _ensure_single_instance():
-    import fcntl, signal
+    import fcntl, signal, time
     lock_path = os.path.expanduser("~/.fastpanel.lock")
+
+    old_pid = None
+    try:
+        with open(lock_path, "r") as f:
+            old_pid = int(f.read().strip())
+    except (FileNotFoundError, ValueError):
+        pass
+
+    if old_pid and old_pid != os.getpid():
+        try:
+            os.kill(old_pid, signal.SIGTERM)
+            for _ in range(20):
+                time.sleep(0.1)
+                try:
+                    os.kill(old_pid, 0)
+                except ProcessLookupError:
+                    break
+            else:
+                try:
+                    os.kill(old_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        except (ProcessLookupError, PermissionError):
+            pass
+
     lock_fd = open(lock_path, "w")
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except IOError:
-        try:
-            with open(lock_path, "r") as f:
-                old_pid = int(f.read().strip())
-            os.kill(old_pid, 0)
-            print(f"FastPanel is already running (PID {old_pid}).")
-        except (ValueError, ProcessLookupError, PermissionError):
-            os.remove(lock_path)
-            lock_fd = open(lock_path, "w")
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            lock_fd.write(str(os.getpid()))
-            lock_fd.flush()
-            return lock_fd
-        sys.exit(0)
+        print("FastPanel: failed to acquire lock, another instance may be running.")
+        sys.exit(1)
+
     lock_fd.write(str(os.getpid()))
     lock_fd.flush()
     return lock_fd

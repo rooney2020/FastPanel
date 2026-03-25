@@ -39,6 +39,8 @@ from fastpanel.dialogs.export import ExportDialog
 from fastpanel.dialogs.settings_dlg import SettingsDialog
 from fastpanel.widgets.clipboard import _ClipboardPopup, _ClipboardMonitor
 from fastpanel.windows.panel_window import _PanelWindow
+from fastpanel.platform.voice_input import VoiceInputController
+from fastpanel.widgets.voice_indicator import VoiceIndicator
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -70,9 +72,12 @@ class MainWindow(QMainWindow):
             self._ask_monitor_mode()
         elif self._desktop_mode and _settings.get("monitor_mode") == "per_monitor":
             self._apply_per_monitor_panels()
+        self._voice_ctrl = None
+        self._voice_indicator = None
         if self._desktop_mode:
             self._setup_tray()
             self._setup_hotkeys()
+            self._setup_voice_input()
             if _settings.get("monitor_mode") == "per_monitor":
                 self._mon_switch_timer = QTimer(self)
                 self._mon_switch_timer.timeout.connect(self._auto_switch_monitor_panel)
@@ -286,6 +291,9 @@ class MainWindow(QMainWindow):
         clip_key = hotkeys.get("clipboard_popup", "")
         if clip_key:
             self._hotkey_mgr.register(clip_key, self._show_clipboard_popup)
+        voice_key = hotkeys.get("voice_input", "")
+        if voice_key:
+            self._hotkey_mgr.register(voice_key, self._toggle_voice_input)
         self._hotkey_mgr.start()
 
     def _stop_hotkeys(self):
@@ -301,6 +309,48 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[Clipboard] ERROR: {e}", flush=True)
             import traceback; traceback.print_exc()
+
+    def _setup_voice_input(self):
+        self._voice_ctrl = VoiceInputController(self)
+        self._voice_indicator = VoiceIndicator()
+        self._voice_ctrl.state_changed.connect(self._on_voice_state)
+        self._voice_ctrl.partial_text.connect(self._on_voice_partial)
+        self._voice_ctrl.final_text.connect(self._on_voice_final)
+        self._voice_ctrl.download_progress.connect(self._on_voice_dl_progress)
+        self._voice_ctrl.error.connect(self._on_voice_error)
+
+    def _toggle_voice_input(self):
+        print("[Voice] toggle requested", flush=True)
+        if self._voice_ctrl:
+            self._voice_ctrl.toggle()
+
+    def _on_voice_state(self, state: str):
+        print(f"[Voice] state → {state}", flush=True)
+        if not self._voice_indicator:
+            return
+        if state == "downloading":
+            self._voice_indicator.show_downloading(0)
+        elif state == "recording":
+            self._voice_indicator.show_recording()
+        elif state == "finalizing":
+            self._voice_indicator.show_finalizing()
+        elif state == "idle":
+            self._voice_indicator.hide()
+
+    def _on_voice_dl_progress(self, pct: int):
+        if self._voice_indicator:
+            self._voice_indicator.show_downloading(pct)
+
+    def _on_voice_partial(self, _text: str):
+        pass
+
+    def _on_voice_final(self, text: str):
+        print(f"[Voice] result: {text}", flush=True)
+
+    def _on_voice_error(self, msg: str):
+        print(f"[Voice] error: {msg}", flush=True)
+        if self._voice_indicator:
+            self._voice_indicator.show_error(msg)
 
     def _toggle_visibility(self):
         if self.isVisible():
@@ -333,6 +383,8 @@ class MainWindow(QMainWindow):
     def _quit_app(self):
         self._save_data()
         self._stop_hotkeys()
+        if self._voice_ctrl:
+            self._voice_ctrl.cleanup()
         for win in list(self._panel_windows.values()):
             win.close()
         self._panel_windows.clear()
@@ -1248,6 +1300,12 @@ class MainWindow(QMainWindow):
                 self._settings_dlg = None
         dlg = SettingsDialog(self)
         self._settings_dlg = dlg
+        if self._voice_ctrl and hasattr(dlg, '_voice_model_status'):
+            from fastpanel.platform.voice_input import VoiceState
+            if self._voice_ctrl.state == VoiceState.DOWNLOADING:
+                self._voice_ctrl.download_progress.connect(dlg._on_voice_dl_progress)
+                self._voice_ctrl.stt_engine.model_ready.connect(dlg._on_voice_dl_done)
+                self._voice_ctrl.stt_engine.model_error.connect(dlg._on_voice_dl_error)
         if dlg.exec_() == QDialog.Accepted:
             global C, _settings
             s = dlg.get_settings()
@@ -1268,6 +1326,7 @@ class MainWindow(QMainWindow):
                     w.setStyleSheet(cs)
                     w.refresh_theme()
                 g.update()
+            
             if self._desktop_mode and "hotkeys" in s:
                 self._stop_hotkeys()
                 self._setup_hotkeys()
