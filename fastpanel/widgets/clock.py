@@ -184,6 +184,8 @@ class _FlipDigit(QWidget):
 
 class FullscreenClockWindow(QWidget):
     """Fullscreen flip-clock overlay that prevents system sleep."""
+    close_requested = pyqtSignal()
+
     def __init__(self, clock_param="", parent=None):
         super().__init__(None)
         self._clock_param = clock_param
@@ -299,9 +301,7 @@ class FullscreenClockWindow(QWidget):
         pass
 
     def _close_fullscreen(self):
-        self._stop_caffeine()
-        self._timer.stop()
-        self.close()
+        self.close_requested.emit()
 
     def closeEvent(self, e):
         self._stop_caffeine()
@@ -375,7 +375,7 @@ class ClockWidget(CompBase):
             self._build_alarm()
 
     def _build_clock(self):
-        self._fs_win = None
+        self._fs_wins = []
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 10, 14, 8); root.setSpacing(4)
         root.setAlignment(Qt.AlignCenter)
@@ -404,17 +404,30 @@ class ClockWidget(CompBase):
 
     def _open_fullscreen_clock(self):
         try:
-            if self._fs_win and self._fs_win.isVisible():
+            if self._fs_wins and any(w.isVisible() for w in self._fs_wins):
                 return
         except RuntimeError:
-            self._fs_win = None
-        self._fs_win = FullscreenClockWindow(self._clock_param)
-        main_win = self.window()
-        if main_win:
-            screen = QApplication.screenAt(main_win.geometry().center())
-            if screen:
-                self._fs_win.setGeometry(screen.geometry())
-        self._fs_win.showFullScreen()
+            self._fs_wins = []
+
+        self._fs_wins = []
+        for screen in QApplication.screens():
+            win = FullscreenClockWindow(self._clock_param)
+            win.setGeometry(screen.geometry())
+            win.close_requested.connect(self._close_all_fullscreen_clocks)
+            self._fs_wins.append(win)
+
+        for win in self._fs_wins:
+            win.showFullScreen()
+
+    def _close_all_fullscreen_clocks(self):
+        wins = self._fs_wins[:]
+        self._fs_wins = []
+        for win in wins:
+            try:
+                win.close_requested.disconnect()
+                win.close()
+            except RuntimeError:
+                pass
 
     def resizeEvent(self, e):
         super().resizeEvent(e)

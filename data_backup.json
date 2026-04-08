@@ -1,0 +1,15 @@
+{
+  "active": 1,
+  "panels": [
+    {
+      "id": "1f6b1693-d77b-412f-af1e-233d38d3ffed",
+      "name": "默认",
+      "components": []
+    },
+    {
+      "id": "f5195f23-936f-489b-9965-940e8ad1dff7",
+      "name": "面板1",
+      "components": []
+    }
+  ]
+}
