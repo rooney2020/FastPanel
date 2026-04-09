@@ -145,6 +145,8 @@ class GridPanel(QWidget):
             self.update()
 
     def set_safe_margins(self, top, bottom):
+        self._raw_safe_margin_top = top
+        self._raw_safe_margin_bottom = bottom
         self._safe_margin_top = ((top + GRID_SIZE - 1) // GRID_SIZE) * GRID_SIZE
         self._safe_margin_bottom = ((bottom + GRID_SIZE - 1) // GRID_SIZE) * GRID_SIZE
 

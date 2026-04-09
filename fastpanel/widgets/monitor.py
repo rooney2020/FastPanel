@@ -243,7 +243,8 @@ class MonitorWidget(CompBase):
         if label:
             p.setPen(QColor(C['subtext0']))
             p.setFont(QFont("JetBrains Mono", 9))
-            p.drawText(QRect(rect.x(), rect.y(), rect.width(), 18), Qt.AlignCenter, label)
+            p.drawText(QRect(rect.x() + 4, rect.y(), rect.width(), 18),
+                       Qt.AlignLeft | Qt.AlignVCenter, label)
 
     def _paint_mem(self, p, area):
         pct = getattr(self, '_mem_percent', 0)

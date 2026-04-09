@@ -27,7 +27,7 @@ class SysInfoWidget(CompBase):
 
     def _build_ui(self):
         lay = QVBoxLayout(self); lay.setContentsMargins(16, 12, 16, 12); lay.setSpacing(6)
-        title = QLabel("💻 系统信息")
+        title = QLabel("系统信息")
         title.setStyleSheet(f"color:{C['text']};font-size:14px;font-weight:bold;background:transparent;")
         lay.addWidget(title)
         import platform

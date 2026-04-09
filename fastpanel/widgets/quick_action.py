@@ -8,19 +8,20 @@ from PyQt5.QtGui import QFont, QColor, QIcon
 
 from fastpanel.constants import GRID_SIZE
 from fastpanel.settings import C, _settings
-from fastpanel.theme import _comp_style, _bg
+from fastpanel.theme import _comp_style, _bg, svg_pixmap, svg_icon
 from fastpanel.utils import _confirm_dialog
 from fastpanel.widgets.base import CompBase
 
+
 _QUICK_ACTIONS = [
-    ("system-lock-screen", "锁屏", "loginctl lock-session", C['blue'], False),
-    ("system-suspend", "挂起", "systemctl suspend", C['lavender'], False),
-    ("camera-photo", "截图", "gnome-screenshot -i", C['teal'], False),
-    ("system-file-manager", "文件", "xdg-open ~", C['green'], False),
-    ("preferences-system", "设置", "gnome-control-center", C['sky'], False),
-    ("system-reboot", "重启", "systemctl reboot", C['red'], True),
-    ("system-shutdown", "关机", "systemctl poweroff", C['red'], True),
-    ("system-log-out", "注销", "gnome-session-quit --logout --no-prompt", C['red'], True),
+    ("lock", "锁屏", "loginctl lock-session", C['blue'], False),
+    ("moon", "挂起", "systemctl suspend", C['lavender'], False),
+    ("camera", "截图", "gnome-screenshot -i", C['teal'], False),
+    ("folder", "文件", "xdg-open ~", C['green'], False),
+    ("settings", "设置", "gnome-control-center", C['sky'], False),
+    ("refresh", "重启", "systemctl reboot", C['red'], True),
+    ("zap", "关机", "systemctl poweroff", C['red'], True),
+    ("log-out", "注销", "gnome-session-quit --logout --no-prompt", C['red'], True),
 ]
 
 
@@ -43,9 +44,9 @@ class _QAButton(QFrame):
         icon_lbl.setAlignment(Qt.AlignCenter)
         icon_lbl.setStyleSheet("background: transparent;")
         icon_lbl.setFixedSize(28, 28)
-        qicon = QIcon.fromTheme(icon_name)
-        if not qicon.isNull():
-            icon_lbl.setPixmap(qicon.pixmap(28, 28))
+        pm = svg_pixmap(icon_name, C['text'], 24)
+        if not pm.isNull():
+            icon_lbl.setPixmap(pm)
         else:
             icon_lbl.setText(icon_name[:2])
             icon_lbl.setStyleSheet(f"font-size:20px; background:transparent; color:{C['text']};")
@@ -181,13 +182,14 @@ class QuickActionWidget(CompBase):
         QTimer.singleShot(300, self._poll_volume)
 
     def _update_mute_btn_style(self):
-        icon_name = "audio-volume-muted" if self._is_muted else "audio-volume-high"
-        qicon = QIcon.fromTheme(icon_name)
-        if not qicon.isNull():
-            self._mute_btn.setIcon(qicon)
-            self._mute_btn.setIconSize(self._mute_btn.size() * 0.6)
+        ico_name = "volume-x" if self._is_muted else "volume"
+        ico = svg_icon(ico_name, C['text'], 18)
+        if not ico.isNull():
+            self._mute_btn.setIcon(ico)
+            self._mute_btn.setIconSize(self._mute_btn.size() * 0.55)
+            self._mute_btn.setText("")
         else:
-            self._mute_btn.setText("🔇" if self._is_muted else "🔊")
+            self._mute_btn.setText("M" if self._is_muted else "V")
         if self._is_muted:
             self._mute_btn.setStyleSheet(
                 f"QPushButton{{background:{C['red']};border:none;border-radius:8px;font-size:16px;}}"

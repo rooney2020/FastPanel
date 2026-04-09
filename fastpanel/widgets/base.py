@@ -19,6 +19,82 @@ from fastpanel.theme import _comp_style, _bg, _hex_to_rgba, _scrollbar_style
 from fastpanel.data import ComponentData
 from fastpanel.utils import count_params, snap
 
+_gtk_workareas_cache = None
+
+def _read_gtk_workareas():
+    global _gtk_workareas_cache
+    if _gtk_workareas_cache is not None:
+        return _gtk_workareas_cache
+    import subprocess, sys
+    if sys.platform != 'linux':
+        _gtk_workareas_cache = []
+        return _gtk_workareas_cache
+    try:
+        out = subprocess.check_output(
+            ["xprop", "-root", "_GTK_WORKAREAS_D0"],
+            timeout=2, stderr=subprocess.DEVNULL
+        ).decode().strip()
+        parts = out.split("=", 1)
+        if len(parts) < 2:
+            _gtk_workareas_cache = []
+            return _gtk_workareas_cache
+        vals = [int(v.strip()) for v in parts[1].split(",")]
+        rects = []
+        for i in range(0, len(vals), 4):
+            if i + 3 < len(vals):
+                rects.append(QRect(vals[i], vals[i + 1], vals[i + 2], vals[i + 3]))
+        _gtk_workareas_cache = rects
+    except Exception:
+        _gtk_workareas_cache = []
+    return _gtk_workareas_cache
+
+
+def _calc_fs_rect(widget):
+    """Calculate fullscreen overlay geometry based on per-monitor work areas."""
+    from PyQt5.QtWidgets import QApplication
+
+    grid = widget.parentWidget()
+    if not grid:
+        return QRect(0, 0, 800, 600)
+
+    center = widget.mapToGlobal(widget.rect().center())
+    screen = QApplication.screenAt(center)
+    if not screen:
+        safe_t = getattr(grid, '_raw_safe_margin_top', getattr(grid, '_safe_margin_top', 0))
+        safe_b = getattr(grid, '_raw_safe_margin_bottom', getattr(grid, '_safe_margin_bottom', 0))
+        return QRect(0, safe_t, grid.width(), grid.height() - safe_t - safe_b)
+
+    full = screen.geometry()
+    safe_t = safe_b = 0
+
+    workareas = _read_gtk_workareas()
+    matched = None
+    for wa in workareas:
+        if full.contains(wa.center()):
+            matched = wa
+            break
+    if not matched:
+        for wa in workareas:
+            if full.intersects(wa):
+                matched = wa
+                break
+
+    if matched:
+        safe_t = max(0, matched.y() - full.y())
+        safe_b = max(0, (full.y() + full.height()) - (matched.y() + matched.height()))
+    else:
+        avail = screen.availableGeometry()
+        safe_t = max(0, avail.y() - full.y())
+        safe_b = max(0, (full.y() + full.height()) - (avail.y() + avail.height()))
+
+    grid_origin = grid.mapToGlobal(QPoint(0, 0))
+    x = full.x() - grid_origin.x()
+    y = full.y() - grid_origin.y() + safe_t
+    w = full.width()
+    h = full.height() - safe_t - safe_b
+    return QRect(x, y, w, h)
+
+
 class DragResizeMixin:
     EDGE_MARGIN = 8
 
@@ -255,13 +331,13 @@ class CompBase(QFrame, DragResizeMixin):
 
         ea = ca = ga = ua = da = None
         if in_selection:
-            ga = menu.addAction("🔗  组合")
+            ga = menu.addAction("组合")
             menu.addSeparator()
-        ea = menu.addAction("✏  修改"); ca = menu.addAction("📋  复制")
+        ea = menu.addAction("修改"); ca = menu.addAction("复制")
         if gid:
             menu.addSeparator()
-            ua = menu.addAction("🔓  解除组合")
-        menu.addSeparator(); da = menu.addAction("🗑  删除")
+            ua = menu.addAction("解除组合")
+        menu.addSeparator(); da = menu.addAction("删除")
         a = menu.exec_(self.mapToGlobal(pos))
         if a is None: return
         if a == ea: self.edit_requested.emit(self)

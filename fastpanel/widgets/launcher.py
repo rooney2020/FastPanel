@@ -157,7 +157,7 @@ class LauncherWidget(CompBase):
         lay.setSpacing(6)
 
         title_row = QHBoxLayout()
-        title_lbl = QLabel("🔍  应用启动器")
+        title_lbl = QLabel("应用启动器")
         title_lbl.setStyleSheet(f"color: {C['text']}; font-size: 14px; font-weight: bold; background: transparent;")
         title_row.addWidget(title_lbl)
         title_row.addStretch()

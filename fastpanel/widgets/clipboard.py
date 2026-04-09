@@ -1,16 +1,27 @@
+import json
 import subprocess
 import sip
+from pathlib import Path
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QScrollArea, QApplication, QGraphicsDropShadowEffect
 )
-from PyQt5.QtCore import Qt, QTimer, QEvent, pyqtSignal
-from PyQt5.QtGui import QFont, QColor, QPixmap, QCursor, QIcon
+from PyQt5.QtCore import Qt, QTimer, QEvent, pyqtSignal, QBuffer, QIODevice, QByteArray
+from PyQt5.QtGui import QFont, QColor, QPixmap, QCursor, QIcon, QImage
 
 from fastpanel.constants import GRID_SIZE
 from fastpanel.settings import C, _settings
 from fastpanel.theme import _comp_style, _bg, _scrollbar_style
 from fastpanel.widgets.base import CompBase
+
+_CLIP_DIR = Path.home() / ".fastpanel" / "clipboard"
+_CLIP_JSON = _CLIP_DIR / "history.json"
+_CLIP_IMG_DIR = _CLIP_DIR / "images"
+
+
+def _ensure_clip_dirs():
+    _CLIP_DIR.mkdir(parents=True, exist_ok=True)
+    _CLIP_IMG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class _ClipboardMonitor:
@@ -34,10 +45,84 @@ class _ClipboardMonitor:
         cls.history.clear()
         cls.img_history.clear()
         cls.all_items.clear()
+        cls._save_to_disk()
+
+    @classmethod
+    def _save_to_disk(cls):
+        _ensure_clip_dirs()
+        for f in _CLIP_IMG_DIR.glob("*.png"):
+            f.unlink(missing_ok=True)
+
+        img_entries = []
+        for i, pm in enumerate(cls.img_history):
+            fname = f"img_{i}.png"
+            pm.save(str(_CLIP_IMG_DIR / fname), "PNG")
+            img_entries.append(fname)
+
+        ordered = []
+        for kind, data in cls.all_items:
+            if kind == 'text':
+                ordered.append({"type": "text", "data": data})
+            else:
+                idx = None
+                for j, pm in enumerate(cls.img_history):
+                    if pm is data:
+                        idx = j
+                        break
+                if idx is not None:
+                    ordered.append({"type": "image", "file": img_entries[idx]})
+
+        payload = {"texts": list(cls.history), "images": img_entries, "order": ordered}
+        try:
+            with open(_CLIP_JSON, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"[Clipboard] save error: {e}", flush=True)
+
+    @classmethod
+    def _load_from_disk(cls):
+        if not _CLIP_JSON.exists():
+            return
+        try:
+            with open(_CLIP_JSON, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            return
+
+        texts = payload.get("texts", [])
+        img_files = payload.get("images", [])
+        order = payload.get("order", [])
+
+        img_map = {}
+        for fname in img_files:
+            p = _CLIP_IMG_DIR / fname
+            if p.exists():
+                pm = QPixmap(str(p))
+                if not pm.isNull():
+                    img_map[fname] = pm
+
+        cls.history = texts[:cls.MAX_TEXT]
+        cls.img_history = [img_map[fn] for fn in img_files if fn in img_map][:cls.MAX_IMG]
+        cls.all_items = []
+        for entry in order:
+            if entry["type"] == "text" and entry["data"] in cls.history:
+                cls.all_items.append(("text", entry["data"]))
+            elif entry["type"] == "image" and entry.get("file") in img_map:
+                cls.all_items.append(("image", img_map[entry["file"]]))
 
     def __init__(self):
-        self._last_text = ""
+        _ClipboardMonitor._load_from_disk()
+        self._last_text = self.history[0] if self.history else ""
         self._last_img_hash = 0
+        cb = QApplication.clipboard()
+        mime = cb.mimeData()
+        if mime and mime.hasImage():
+            img = cb.image()
+            if not img.isNull():
+                self._last_img_hash = hash(
+                    img.bits().asstring(img.byteCount())
+                    if hasattr(img.bits(), 'asstring')
+                    else img.sizeInBytes())
         self._timer = QTimer()
         self._timer.timeout.connect(self._poll)
         self._timer.start(800)
@@ -61,6 +146,7 @@ class _ClipboardMonitor:
                         except ValueError:
                             pass
                     _ClipboardMonitor.all_items.insert(0, ('image', pm))
+                    _ClipboardMonitor._save_to_disk()
                     return
         text = cb.text()
         if text and text != self._last_text:
@@ -79,6 +165,7 @@ class _ClipboardMonitor:
                 except ValueError:
                     pass
             _ClipboardMonitor.all_items.insert(0, ('text', text))
+            _ClipboardMonitor._save_to_disk()
 
 
 class ClipboardWidget(CompBase):
@@ -104,7 +191,7 @@ class ClipboardWidget(CompBase):
     def _build_ui(self):
         lay = QVBoxLayout(self); lay.setContentsMargins(12, 10, 12, 10); lay.setSpacing(6)
         hdr = QHBoxLayout()
-        title = QLabel("📋 剪贴板历史")
+        title = QLabel("剪贴板历史")
         title.setStyleSheet(f"color:{C['text']};font-size:14px;font-weight:bold;background:transparent;")
         hdr.addWidget(title); hdr.addStretch()
         cnt_lbl = QLabel(f"文本 {len(_ClipboardMonitor.history)} · 图片 {len(_ClipboardMonitor.img_history)}")
@@ -149,7 +236,7 @@ class ClipboardWidget(CompBase):
                 thumb.setPixmap(scaled)
                 thumb.setStyleSheet("background:transparent;")
                 fl.addWidget(thumb)
-                info = QLabel(f"🖼 图片 {pm.width()}×{pm.height()}")
+                info = QLabel(f"图片 {pm.width()}x{pm.height()}")
                 info.setStyleSheet(f"color:{C['text']};font-size:10px;background:transparent;")
                 fl.addWidget(info, 1)
                 frame.mousePressEvent = lambda e, p=pm: self._paste_image(p)
@@ -216,8 +303,12 @@ class _ClipboardPopup(QWidget):
         lay = QVBoxLayout(self); lay.setContentsMargins(14, 14, 14, 10); lay.setSpacing(8)
 
         header = QHBoxLayout(); header.setSpacing(8)
-        icon_lbl = QLabel("📋")
-        icon_lbl.setStyleSheet(f"font-size:18px;background:transparent;")
+        from fastpanel.theme import svg_pixmap as _sp
+        icon_lbl = QLabel()
+        _pm = _sp("clipboard", C['text'], 18)
+        if not _pm.isNull():
+            icon_lbl.setPixmap(_pm)
+        icon_lbl.setStyleSheet(f"background:transparent;")
         header.addWidget(icon_lbl)
         title = QLabel("剪贴板历史")
         title.setStyleSheet(f"color:{C['text']};font-size:15px;font-weight:bold;background:transparent;")
@@ -287,7 +378,7 @@ class _ClipboardPopup(QWidget):
                 info = QLabel(f"图片  {pm.width()}×{pm.height()}")
                 info.setStyleSheet(f"color:{C['text']};font-size:11px;background:transparent;")
                 info_lay.addWidget(info)
-                tag = QLabel("🖼 图像")
+                tag = QLabel("图像")
                 tag.setStyleSheet(f"color:{C['subtext0']};font-size:9px;background:transparent;")
                 info_lay.addWidget(tag)
                 fl.addLayout(info_lay, 1)

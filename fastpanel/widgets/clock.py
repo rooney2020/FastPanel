@@ -19,6 +19,7 @@ from fastpanel.settings import C, _settings
 from fastpanel.theme import _comp_style, _bg, _dialog_style, _scrollbar_style, _style_combobox
 from fastpanel.widgets.base import CompBase, _ExpandBtn
 from fastpanel.widgets.calendar_w import _solar_to_lunar
+from fastpanel.theme import svg_icon
 
 class _CircleBtn(QPushButton):
     """Circular button with custom-painted icon."""
@@ -87,7 +88,7 @@ class _TimerAlertOverlay(QWidget):
         root = QVBoxLayout(self)
         root.setAlignment(Qt.AlignCenter)
 
-        self._title = QLabel("⏰ 计时已结束")
+        self._title = QLabel("计时已结束")
         self._title.setAlignment(Qt.AlignCenter)
         self._title.setStyleSheet("color: white; font-size: 48px; font-weight: bold; background: transparent;")
         root.addWidget(self._title)
@@ -234,33 +235,71 @@ class FullscreenClockWindow(QWidget):
         self._tick()
 
     def _start_caffeine(self):
+        self._caffeine_procs = []
+        self._dbus_cookie = None
+
         try:
-            self._caffeine_proc = subprocess.Popen(
+            import gi
+            gi.require_version('Gio', '2.0')
+            gi.require_version('GLib', '2.0')
+            from gi.repository import Gio, GLib
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            result = bus.call_sync(
+                'org.freedesktop.ScreenSaver',
+                '/org/freedesktop/ScreenSaver',
+                'org.freedesktop.ScreenSaver',
+                'Inhibit',
+                GLib.Variant('(ss)', ('FastPanel', 'Fullscreen clock active')),
+                GLib.VariantType('(u)'),
+                Gio.DBusCallFlags.NONE, -1, None)
+            self._dbus_cookie = result.unpack()[0]
+        except Exception:
+            pass
+
+        try:
+            p = subprocess.Popen(
+                ["gnome-session-inhibit", "--inhibit", "idle",
+                 "--reason", "Fullscreen clock", "--inhibit-only"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._caffeine_procs.append(p)
+        except Exception:
+            pass
+
+        try:
+            p = subprocess.Popen(
                 ["systemd-inhibit", "--what=idle:sleep", "--who=FastPanel",
                  "--why=Fullscreen clock", "--mode=block", "sleep", "86400"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._caffeine_procs.append(p)
         except Exception:
-            try:
-                self._caffeine_proc = subprocess.Popen(
-                    ["xdg-screensaver", "suspend", str(int(self.winId()))],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                try:
-                    self._caffeine_proc = subprocess.Popen(
-                        ["caffeine"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception:
-                    self._caffeine_proc = None
+            pass
 
     def _stop_caffeine(self):
-        if self._caffeine_proc:
+        if self._dbus_cookie is not None:
             try:
-                self._caffeine_proc.terminate()
-                self._caffeine_proc.wait(timeout=3)
+                import gi
+                gi.require_version('Gio', '2.0')
+                from gi.repository import Gio, GLib
+                bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+                bus.call_sync(
+                    'org.freedesktop.ScreenSaver',
+                    '/org/freedesktop/ScreenSaver',
+                    'org.freedesktop.ScreenSaver',
+                    'UnInhibit',
+                    GLib.Variant('(u)', (self._dbus_cookie,)),
+                    None, Gio.DBusCallFlags.NONE, -1, None)
             except Exception:
-                try: self._caffeine_proc.kill()
+                pass
+            self._dbus_cookie = None
+
+        for p in getattr(self, '_caffeine_procs', []):
+            try:
+                p.terminate()
+                p.wait(timeout=3)
+            except Exception:
+                try: p.kill()
                 except Exception: pass
-            self._caffeine_proc = None
+        self._caffeine_procs = []
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -638,22 +677,24 @@ class ClockWidget(CompBase):
         btns.addWidget(self._tm_start_btn)
 
         self._tm_alert_mode = 2 if self._tm_alert else 0
-        _alert_icons = ["🔕", "🔇", "🔔"]
         _alert_tips = ["不提醒", "静音提醒（弹窗）", "声音提醒（弹窗+声音）"]
-        _alert_colors = [(C['surface2'], C['overlay0']), (C['blue'], C['crust']), (C['peach'], C['crust'])]
-        self._tm_alert_btn = QPushButton(_alert_icons[self._tm_alert_mode])
+        _alert_bg = [C['surface2'], C['blue'], C['peach']]
+        _alert_fg = [C['overlay0'], C['crust'], C['crust']]
+        self._tm_alert_btn = QPushButton()
         self._tm_alert_btn.setFixedSize(38, 38)
-        bg, fg = _alert_colors[self._tm_alert_mode]
-        self._tm_alert_btn.setStyleSheet(f"background:{bg}; color:{fg}; border:none; border-radius:19px; font-size:16px;")
+        self._tm_alert_btn.setIconSize(self._tm_alert_btn.size() * 0.45)
+        bg = _alert_bg[self._tm_alert_mode]; fg = _alert_fg[self._tm_alert_mode]
+        self._tm_alert_btn.setIcon(svg_icon("bell", fg, 18))
+        self._tm_alert_btn.setStyleSheet(f"background:{bg}; border:none; border-radius:19px;")
         self._tm_alert_btn.setCursor(Qt.PointingHandCursor)
         self._tm_alert_btn.setToolTip(_alert_tips[self._tm_alert_mode])
         def _cycle_alert():
             self._tm_alert_mode = (self._tm_alert_mode + 1) % 3
             self._tm_alert = self._tm_alert_mode >= 1
-            self._tm_alert_btn.setText(_alert_icons[self._tm_alert_mode])
+            bg = _alert_bg[self._tm_alert_mode]; fg = _alert_fg[self._tm_alert_mode]
+            self._tm_alert_btn.setIcon(svg_icon("bell", fg, 18))
             self._tm_alert_btn.setToolTip(_alert_tips[self._tm_alert_mode])
-            bg, fg = _alert_colors[self._tm_alert_mode]
-            self._tm_alert_btn.setStyleSheet(f"background:{bg}; color:{fg}; border:none; border-radius:19px; font-size:16px;")
+            self._tm_alert_btn.setStyleSheet(f"background:{bg}; border:none; border-radius:19px;")
             self._tm_save_values()
         self._tm_alert_btn.clicked.connect(_cycle_alert)
         btns.addWidget(self._tm_alert_btn)
@@ -746,7 +787,7 @@ class ClockWidget(CompBase):
                 self._tm_start_btn.setToolTip("开始")
                 self._tm_display.hide()
                 self._tm_set_row.show()
-                self._tm_status_lbl.setText("⏰ 计时结束")
+                self._tm_status_lbl.setText("计时结束")
                 self._tm_status_lbl.setStyleSheet(f"color:{C['red']}; font-size:13px; font-weight:bold;")
                 if self._tm_alert_mode >= 1:
                     self._tm_show_alert_overlay()
@@ -909,6 +950,63 @@ class ClockWidget(CompBase):
         if w and hasattr(w, '_save_data'):
             w._save_data()
 
+    def _calc_alarm_remaining(self, alarm):
+        if not alarm.get("enabled", True):
+            return None
+        now = datetime.datetime.now()
+        try:
+            tp = alarm.get("time", "08:00").split(":")
+            ah, am = int(tp[0]), int(tp[1])
+        except (ValueError, IndexError):
+            return None
+        repeat = alarm.get("repeat", "once")
+        if repeat == "once":
+            ds = alarm.get("date", "")
+            if ds:
+                try:
+                    dp = ds.split("-")
+                    target = datetime.datetime(int(dp[0]), int(dp[1]), int(dp[2]), ah, am)
+                except (ValueError, IndexError):
+                    return None
+                if target <= now:
+                    return None
+            else:
+                target = now.replace(hour=ah, minute=am, second=0, microsecond=0)
+                if target <= now:
+                    target += datetime.timedelta(days=1)
+        elif repeat == "daily":
+            target = now.replace(hour=ah, minute=am, second=0, microsecond=0)
+            if target <= now:
+                target += datetime.timedelta(days=1)
+        elif repeat == "weekdays":
+            target = now.replace(hour=ah, minute=am, second=0, microsecond=0)
+            if target <= now:
+                target += datetime.timedelta(days=1)
+            while target.weekday() >= 5:
+                target += datetime.timedelta(days=1)
+        elif repeat == "weekends":
+            target = now.replace(hour=ah, minute=am, second=0, microsecond=0)
+            if target <= now:
+                target += datetime.timedelta(days=1)
+            while target.weekday() < 5:
+                target += datetime.timedelta(days=1)
+        else:
+            return None
+        delta = target - now
+        total_secs = int(delta.total_seconds())
+        if total_secs <= 0:
+            return None
+        days = total_secs // 86400
+        hours = (total_secs % 86400) // 3600
+        minutes = (total_secs % 3600) // 60
+        parts = []
+        if days > 0:
+            parts.append(f"{days}天")
+        if hours > 0:
+            parts.append(f"{hours}小时")
+        parts.append(f"{minutes}分钟")
+        return f"还有{''.join(parts)}后响铃"
+
     def _build_alarm(self):
         self._alarm_load()
         self._alarm_fired_set = set()
@@ -919,7 +1017,7 @@ class ClockWidget(CompBase):
         root.setSpacing(6)
 
         header = QHBoxLayout()
-        title = QLabel("⏰ 闹钟")
+        title = QLabel("闹钟")
         title.setStyleSheet(f"color:{C['text']}; font-size:15px; font-weight:bold; background:transparent;")
         header.addWidget(title)
         header.addStretch()
@@ -963,6 +1061,7 @@ class ClockWidget(CompBase):
             if w:
                 w.deleteLater()
 
+        self._alarm_remain_lbls = []
         _REPEAT_LABELS = {"once": "单次", "daily": "每天", "weekdays": "工作日", "weekends": "周末"}
 
         for i, a in enumerate(self._alarms):
@@ -995,17 +1094,24 @@ class ClockWidget(CompBase):
             info_col = QVBoxLayout()
             info_col.setSpacing(0)
             repeat_text = _REPEAT_LABELS.get(a.get("repeat", "once"), "单次")
-            date_str = a.get("date", "")
-            if a.get("repeat") == "once" and date_str:
-                info_text = date_str
-            else:
-                info_text = repeat_text
             label_str = a.get("label", "")
+            info_text = repeat_text
             if label_str:
                 info_text = f"{info_text}  {label_str}"
             info_lbl = QLabel(info_text)
             info_lbl.setStyleSheet(f"color:{C['subtext0'] if en else C['overlay0']}; font-size:11px; background:transparent;")
             info_col.addWidget(info_lbl)
+
+            remain_lbl = QLabel("")
+            remain_lbl.setStyleSheet(f"color:{C['green']}; font-size:10px; background:transparent;")
+            remain_text = self._calc_alarm_remaining(a)
+            if remain_text:
+                remain_lbl.setText(remain_text)
+            else:
+                remain_lbl.hide()
+            info_col.addWidget(remain_lbl)
+            self._alarm_remain_lbls.append((i, remain_lbl))
+
             rl.addLayout(info_col, 1)
 
             del_btn = QPushButton("✕")
@@ -1049,8 +1155,8 @@ class ClockWidget(CompBase):
             self._alarm_rebuild_list()
 
     def _alarm_dialog(self, existing=None):
-        from PyQt5.QtWidgets import QTimeEdit, QDateEdit
-        from PyQt5.QtCore import QTime, QDate
+        from PyQt5.QtWidgets import QTimeEdit
+        from PyQt5.QtCore import QTime
 
         is_edit = existing is not None
         dlg = QDialog(self)
@@ -1065,13 +1171,12 @@ class ClockWidget(CompBase):
             QLineEdit {{ background: {_bg('surface0')}; color: {C['text']}; border: 1px solid {C['surface2']};
                 border-radius: 8px; padding: 8px 12px; font-size: 13px; }}
             QLineEdit:focus {{ border: 1px solid {C['blue']}; }}
-            QDateEdit, QTimeEdit {{ background: {_bg('surface0')}; color: {C['text']}; border: 1px solid {C['surface2']};
+            QTimeEdit {{ background: {_bg('surface0')}; color: {C['text']}; border: 1px solid {C['surface2']};
                 border-radius: 8px; padding: 8px 12px; font-size: 15px; font-weight: bold;
                 font-family: 'JetBrains Mono','Consolas',monospace; }}
-            QDateEdit:focus, QTimeEdit:focus {{ border: 1px solid {C['blue']}; }}
-            QDateEdit::up-button, QDateEdit::down-button, QTimeEdit::up-button, QTimeEdit::down-button {{
+            QTimeEdit:focus {{ border: 1px solid {C['blue']}; }}
+            QTimeEdit::up-button, QTimeEdit::down-button {{
                 width: 20px; border: none; background: transparent; }}
-            QCalendarWidget {{ background: {_bg('surface0')}; color: {C['text']}; }}
             QPushButton#okBtn {{ background: {C['blue']}; color: {C['crust']}; border: none;
                 border-radius: 8px; padding: 10px 24px; font-size: 13px; font-weight: bold; }}
             QPushButton#okBtn:hover {{ background: {C['sky']}; }}
@@ -1083,7 +1188,7 @@ class ClockWidget(CompBase):
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(14)
 
-        title = QLabel("⏰ 编辑闹钟" if is_edit else "⏰ 新闹钟")
+        title = QLabel("编辑闹钟" if is_edit else "新闹钟")
         title.setObjectName("dialogTitle")
         lay.addWidget(title)
 
@@ -1098,13 +1203,13 @@ class ClockWidget(CompBase):
             time_edit.setTime(QTime.currentTime().addSecs(3600))
         lay.addWidget(time_edit)
 
-        grid = QHBoxLayout()
-        grid.setSpacing(8)
-        repeat_col = QVBoxLayout()
+        repeat_row = QVBoxLayout()
+        repeat_row.setSpacing(2)
         repeat_lbl = QLabel("重复")
         repeat_lbl.setStyleSheet(f"color:{C['subtext0']}; font-size:11px;")
-        repeat_col.addWidget(repeat_lbl)
+        repeat_row.addWidget(repeat_lbl)
         repeat_combo = QComboBox()
+        repeat_combo.setMaxVisibleItems(10)
         for k, v in [("once", "单次"), ("daily", "每天"), ("weekdays", "工作日"), ("weekends", "周末")]:
             repeat_combo.addItem(v, k)
         if is_edit:
@@ -1113,31 +1218,8 @@ class ClockWidget(CompBase):
             if r in repeat_keys:
                 repeat_combo.setCurrentIndex(repeat_keys.index(r))
         _style_combobox(repeat_combo)
-        repeat_col.addWidget(repeat_combo)
-        grid.addLayout(repeat_col, 1)
-
-        date_col = QVBoxLayout()
-        date_lbl = QLabel("日期")
-        date_lbl.setStyleSheet(f"color:{C['subtext0']}; font-size:11px;")
-        date_col.addWidget(date_lbl)
-        date_edit = QDateEdit()
-        date_edit.setDisplayFormat("yyyy-MM-dd")
-        date_edit.setCalendarPopup(True)
-        if is_edit and existing.get("date"):
-            parts = existing["date"].split("-")
-            date_edit.setDate(QDate(int(parts[0]), int(parts[1]), int(parts[2])))
-        else:
-            date_edit.setDate(QDate.currentDate())
-        date_col.addWidget(date_edit)
-        grid.addLayout(date_col, 1)
-        lay.addLayout(grid)
-
-        def _on_repeat_changed(_=0):
-            is_once = repeat_combo.currentData() == "once"
-            for w in [date_lbl, date_edit]:
-                w.setVisible(is_once)
-        repeat_combo.currentIndexChanged.connect(_on_repeat_changed)
-        _on_repeat_changed()
+        repeat_row.addWidget(repeat_combo)
+        lay.addLayout(repeat_row)
 
         label_col = QVBoxLayout()
         label_col.setSpacing(2)
@@ -1173,8 +1255,6 @@ class ClockWidget(CompBase):
                 "label": label_edit.text().strip(),
                 "enabled": existing.get("enabled", True) if is_edit else True,
             }
-            if alarm["repeat"] == "once":
-                alarm["date"] = date_edit.date().toString("yyyy-MM-dd")
             return alarm
         return None
 
@@ -1220,6 +1300,16 @@ class ClockWidget(CompBase):
             self._alarm_save()
             self._alarm_rebuild_list()
 
+        if hasattr(self, '_alarm_remain_lbls'):
+            for idx, lbl in self._alarm_remain_lbls:
+                if idx < len(self._alarms):
+                    remain_text = self._calc_alarm_remaining(self._alarms[idx])
+                    if remain_text:
+                        lbl.setText(remain_text)
+                        lbl.show()
+                    else:
+                        lbl.hide()
+
     def _alarm_show_alert(self, label, time_str):
         try:
             if self._alarm_alert_overlay and self._alarm_alert_overlay.isVisible():
@@ -1227,7 +1317,7 @@ class ClockWidget(CompBase):
         except RuntimeError:
             self._alarm_alert_overlay = None
         overlay = _TimerAlertOverlay()
-        overlay._title.setText(f"⏰ {label}")
+        overlay._title.setText(label)
         overlay._elapsed_lbl.setText(time_str)
         overlay._elapsed_lbl.setStyleSheet(
             "color: rgba(255,255,255,0.9); font-size: 72px; font-weight: bold; "

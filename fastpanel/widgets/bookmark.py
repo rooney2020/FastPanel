@@ -34,7 +34,7 @@ class BookmarkWidget(CompBase):
     def _build_ui(self):
         lay = QVBoxLayout(self); lay.setContentsMargins(12, 10, 12, 10); lay.setSpacing(6)
         hdr = QHBoxLayout()
-        title = QLabel("🔖 书签管理")
+        title = QLabel("书签管理")
         title.setStyleSheet(f"color:{C['text']};font-size:14px;font-weight:bold;background:transparent;")
         hdr.addWidget(title); hdr.addStretch()
         add_btn = QPushButton("＋"); add_btn.setCursor(Qt.PointingHandCursor)

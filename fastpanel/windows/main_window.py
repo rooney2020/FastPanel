@@ -91,20 +91,23 @@ class MainWindow(QMainWindow):
         tb = QFrame(); tb.setObjectName("toolbar"); tb.setFixedHeight(48)
         self._toolbar = tb
         tl = QHBoxLayout(tb); tl.setContentsMargins(16,0,8,0); tl.setSpacing(8)
-        logo = QLabel("⚡ FastPanel"); logo.setObjectName("logo"); tl.addWidget(logo)
+        logo = QLabel("FastPanel"); logo.setObjectName("logo"); tl.addWidget(logo)
         tl.addStretch()
         self._cnt = QLabel("0 个组件"); self._cnt.setObjectName("countLabel"); tl.addWidget(self._cnt)
-        for txt, slot in [("📥 导入", self._on_import), ("📤 导出", self._on_export)]:
+        for txt, slot in [("导入", self._on_import), ("导出", self._on_export)]:
             b = QPushButton(txt); b.setObjectName("ioBtn"); b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(slot); tl.addWidget(b)
         self._grid_btn = QPushButton("▦"); self._grid_btn.setObjectName("gridBtn")
         self._grid_btn.setCursor(Qt.PointingHandCursor); self._grid_btn.setToolTip("显示/隐藏网格")
         self._grid_btn.setProperty("active", _settings.get("show_grid", True))
         self._grid_btn.clicked.connect(self._toggle_grid); tl.addWidget(self._grid_btn)
-        self._lock_btn = QPushButton("🔓"); self._lock_btn.setObjectName("lockBtn")
+        from fastpanel.theme import svg_icon as _si
+        self._lock_btn = QPushButton(); self._lock_btn.setObjectName("lockBtn")
+        self._lock_btn.setIcon(_si("unlock", C['text'], 16))
         self._lock_btn.setCursor(Qt.PointingHandCursor); self._lock_btn.setToolTip("锁定/解锁布局")
         self._lock_btn.clicked.connect(self._toggle_lock); tl.addWidget(self._lock_btn)
-        sb = QPushButton("⚙"); sb.setObjectName("settingsBtn")
+        sb = QPushButton(); sb.setObjectName("settingsBtn")
+        sb.setIcon(_si("settings", C['text'], 16))
         sb.setCursor(Qt.PointingHandCursor); sb.setToolTip("设置")
         sb.clicked.connect(self._on_settings); tl.addWidget(sb)
         ab = QPushButton("＋  新建组件"); ab.setObjectName("addBtn"); ab.setCursor(Qt.PointingHandCursor)
@@ -496,20 +499,20 @@ class MainWindow(QMainWindow):
         _style = self._ctx_menu_style()
 
         _simple = [
-            ("📋 剪贴板", TYPE_CLIPBOARD, ""),
-            ("📝 便签", TYPE_NOTE, ""),
-            ("✅ 待办", TYPE_TODO, ""),
-            ("🎛 快捷操作", TYPE_QUICKACTION, ""),
-            ("📅 日历", TYPE_CALENDAR, ""),
-            ("🔢 计算器", TYPE_CALC, ""),
-            ("🔖 书签", TYPE_BOOKMARK, ""),
-            ("🗑 回收站", TYPE_TRASH, ""),
-            ("🚀 应用启动器", TYPE_LAUNCHER, ""),
-            ("🎵 媒体控制", TYPE_MEDIA, ""),
-            ("🖼 相册", TYPE_GALLERY, ""),
-            ("💻 系统信息", TYPE_SYSINFO, ""),
-            ("📰 RSS", TYPE_RSS, ""),
-            ("📌 Dock栏", TYPE_DOCK, ""),
+            ("剪贴板", TYPE_CLIPBOARD, ""),
+            ("便签", TYPE_NOTE, ""),
+            ("待办", TYPE_TODO, ""),
+            ("快捷操作", TYPE_QUICKACTION, ""),
+            ("日历", TYPE_CALENDAR, ""),
+            ("计算器", TYPE_CALC, ""),
+            ("书签", TYPE_BOOKMARK, ""),
+            ("回收站", TYPE_TRASH, ""),
+            ("应用启动器", TYPE_LAUNCHER, ""),
+            ("媒体控制", TYPE_MEDIA, ""),
+            ("相册", TYPE_GALLERY, ""),
+            ("系统信息", TYPE_SYSINFO, ""),
+            ("RSS", TYPE_RSS, ""),
+            ("Dock栏", TYPE_DOCK, ""),
         ]
         for label, t, cmd in _simple:
             act = add_menu.addAction(label)
@@ -517,27 +520,27 @@ class MainWindow(QMainWindow):
 
         add_menu.addSeparator()
 
-        clock_sub = add_menu.addMenu("🕐 时钟")
+        clock_sub = add_menu.addMenu("时钟")
         clock_sub.setStyleSheet(_style)
         for sub_id, sub_name in CLOCK_SUB_LABELS.items():
             act = clock_sub.addAction(sub_name)
             act.triggered.connect(lambda _, s=sub_id: self._quick_add(TYPE_CLOCK, s))
 
-        mon_sub = add_menu.addMenu("📊 系统监控")
+        mon_sub = add_menu.addMenu("系统监控")
         mon_sub.setStyleSheet(_style)
         for sub_id, sub_name in MONITOR_SUB_LABELS.items():
             act = mon_sub.addAction(sub_name)
             act.triggered.connect(lambda _, s=sub_id: self._quick_add(TYPE_MONITOR, s))
 
-        weather_act = add_menu.addAction("🌤 天气")
+        weather_act = add_menu.addAction("天气")
         weather_act.triggered.connect(lambda: self._quick_add(TYPE_WEATHER))
 
         add_menu.addSeparator()
-        cmd_act = add_menu.addAction("⌨ CMD 命令")
+        cmd_act = add_menu.addAction("CMD 命令")
         cmd_act.triggered.connect(lambda: self._quick_add(TYPE_CMD))
-        cmdwin_act = add_menu.addAction("🖥 CMD 窗口")
+        cmdwin_act = add_menu.addAction("CMD 窗口")
         cmdwin_act.triggered.connect(lambda: self._quick_add(TYPE_CMD_WINDOW))
-        shortcut_act = add_menu.addAction("🔗 快捷方式")
+        shortcut_act = add_menu.addAction("快捷方式")
         shortcut_act.triggered.connect(lambda: self._quick_add(TYPE_SHORTCUT))
 
         menu.addSeparator()
@@ -574,12 +577,12 @@ class MainWindow(QMainWindow):
             _can_delete = True
             if _is_per_mon and len(self._panels_data) <= len(QApplication.screens()):
                 _can_delete = False
-            rename_act = panel_menu.addAction("✏  重命名当前面板")
+            rename_act = panel_menu.addAction("重命名当前面板")
             rename_act.triggered.connect(lambda: self._on_rename_panel(self._active))
             if _can_delete:
-                del_act = panel_menu.addAction("🗑  删除当前面板")
+                del_act = panel_menu.addAction("删除当前面板")
                 del_act.triggered.connect(lambda: self._on_delete_panel(self._active))
-        copy_act = panel_menu.addAction("📋  复制当前面板")
+        copy_act = panel_menu.addAction("复制当前面板")
         copy_act.triggered.connect(lambda: self._on_copy_panel(self._active))
 
         menu.addSeparator()
@@ -598,13 +601,13 @@ class MainWindow(QMainWindow):
         lock_act.triggered.connect(self._toggle_lock)
 
         menu.addSeparator()
-        imp_act = menu.addAction("📥  导入")
+        imp_act = menu.addAction("导入")
         imp_act.triggered.connect(self._on_import)
-        exp_act = menu.addAction("📤  导出")
+        exp_act = menu.addAction("导出")
         exp_act.triggered.connect(self._on_export)
 
         menu.addSeparator()
-        settings_act = menu.addAction("⚙  设置")
+        settings_act = menu.addAction("设置")
         settings_act.triggered.connect(self._on_settings)
 
         menu.addSeparator()
@@ -1020,7 +1023,7 @@ class MainWindow(QMainWindow):
             dlg.setFixedWidth(420)
             dlg.setStyleSheet(_dialog_style())
             lay = QVBoxLayout(dlg); lay.setSpacing(16); lay.setContentsMargins(28, 24, 28, 24)
-            h = QLabel("🖥  检测到多个显示器"); h.setObjectName("heading"); lay.addWidget(h)
+            h = QLabel("检测到多个显示器"); h.setObjectName("heading"); lay.addWidget(h)
             info = QLabel(f"当前有 {len(screens)} 个显示器，请选择布局方式：")
             info.setStyleSheet(f"color:{C['subtext0']};font-size:13px;")
             info.setWordWrap(True); lay.addWidget(info)
@@ -1032,7 +1035,7 @@ class MainWindow(QMainWindow):
             opt1.setCursor(Qt.PointingHandCursor)
             lay.addWidget(opt1)
 
-            opt2 = QPushButton("🖥 每个显示器独立面板")
+            opt2 = QPushButton("每个显示器独立面板")
             opt2.setStyleSheet(f"QPushButton{{background:{C['surface0']};color:{C['text']};border:1px solid {C['surface2']};"
                                f"border-radius:10px;padding:14px;font-size:13px;text-align:left;}}"
                                f"QPushButton:hover{{border-color:{C['blue']};background:{C['surface1']};}}")
@@ -1064,7 +1067,7 @@ class MainWindow(QMainWindow):
         dlg.setFixedWidth(420)
         dlg.setStyleSheet(_dialog_style())
         lay = QVBoxLayout(dlg); lay.setSpacing(16); lay.setContentsMargins(28, 24, 28, 24)
-        h = QLabel("🖥  检测到多个显示器"); h.setObjectName("heading"); lay.addWidget(h)
+        h = QLabel("检测到多个显示器"); h.setObjectName("heading"); lay.addWidget(h)
         info = QLabel(f"当前有 {len(screens)} 个显示器，请选择布局方式：")
         info.setStyleSheet(f"color:{C['subtext0']};font-size:13px;")
         info.setWordWrap(True); lay.addWidget(info)
@@ -1075,7 +1078,7 @@ class MainWindow(QMainWindow):
                            f"QPushButton:hover{{border-color:{C['blue']};background:{C['surface1']};}}")
         opt1.setCursor(Qt.PointingHandCursor); lay.addWidget(opt1)
 
-        opt2 = QPushButton("🖥 每个显示器独立面板")
+        opt2 = QPushButton("每个显示器独立面板")
         opt2.setStyleSheet(f"QPushButton{{background:{C['surface0']};color:{C['text']};border:1px solid {C['surface2']};"
                            f"border-radius:10px;padding:14px;font-size:13px;text-align:left;}}"
                            f"QPushButton:hover{{border-color:{C['blue']};background:{C['surface1']};}}")
@@ -1279,7 +1282,8 @@ class MainWindow(QMainWindow):
     def _toggle_lock(self):
         self._locked = not self._locked
         if not self._desktop_mode:
-            self._lock_btn.setText("🔒" if self._locked else "🔓")
+            from fastpanel.theme import svg_icon as _si2
+            self._lock_btn.setIcon(_si2("lock" if self._locked else "unlock", C['text'], 16))
             self._lock_btn.setProperty("locked", self._locked)
             self._lock_btn.style().unpolish(self._lock_btn)
             self._lock_btn.style().polish(self._lock_btn)

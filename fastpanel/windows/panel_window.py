@@ -55,7 +55,7 @@ class _PanelWindow(QMainWindow):
 
         tb = QFrame(); tb.setObjectName("toolbar"); tb.setFixedHeight(32)
         tl = QHBoxLayout(tb); tl.setContentsMargins(12, 0, 4, 0); tl.setSpacing(6)
-        logo = QLabel(f"⚡ {self._panel_data.name}")
+        logo = QLabel(self._panel_data.name)
         logo.setObjectName("logo"); tl.addWidget(logo)
         tl.addStretch()
         self._cnt = QLabel("0 个组件"); self._cnt.setObjectName("countLabel"); tl.addWidget(self._cnt)
@@ -65,9 +65,19 @@ class _PanelWindow(QMainWindow):
         self._grid_btn.setProperty("active", True)
         self._grid_btn.clicked.connect(self._toggle_grid); tl.addWidget(self._grid_btn)
 
-        self._lock_btn = QPushButton("🔓"); self._lock_btn.setObjectName("lockBtn")
+        from fastpanel.theme import svg_icon as _si
+        self._lock_btn = QPushButton(); self._lock_btn.setObjectName("lockBtn")
+        self._lock_btn.setIcon(_si("unlock", C['text'], 16))
         self._lock_btn.setCursor(Qt.PointingHandCursor); self._lock_btn.setToolTip("锁定/解锁布局")
         self._lock_btn.clicked.connect(self._toggle_lock); tl.addWidget(self._lock_btn)
+
+        sb = QPushButton(); sb.setObjectName("settingsBtn")
+        sb.setIcon(_si("settings", C['text'], 16))
+        sb.setCursor(Qt.PointingHandCursor); sb.setToolTip("设置")
+        sb.clicked.connect(self._on_settings); tl.addWidget(sb)
+
+        ab = QPushButton("＋  新建组件"); ab.setObjectName("addBtn"); ab.setCursor(Qt.PointingHandCursor)
+        ab.clicked.connect(self._on_add); tl.addWidget(ab)
 
         for txt, oid, slot in [("—", "winMinBtn", self.showMinimized),
                                 ("", "winMaxBtn", self._toggle_max),
@@ -158,7 +168,8 @@ class _PanelWindow(QMainWindow):
 
     def _toggle_lock(self):
         self._locked = not self._locked
-        self._lock_btn.setText("🔒" if self._locked else "🔓")
+        from fastpanel.theme import svg_icon as _si2
+        self._lock_btn.setIcon(_si2("lock" if self._locked else "unlock", C['text'], 16))
         for w in self._grid.components:
             w.setProperty("locked", self._locked)
 
@@ -311,6 +322,57 @@ class _PanelWindow(QMainWindow):
 
     # --- right-click menu for adding components ---
 
+    def _on_add(self):
+        menu = QMenu(self)
+        _style = self._ctx_menu_style()
+        menu.setStyleSheet(_style)
+
+        _simple = [
+            ("剪贴板", TYPE_CLIPBOARD, ""), ("便签", TYPE_NOTE, ""),
+            ("待办", TYPE_TODO, ""), ("快捷操作", TYPE_QUICKACTION, ""),
+            ("日历", TYPE_CALENDAR, ""), ("计算器", TYPE_CALC, ""),
+            ("书签", TYPE_BOOKMARK, ""), ("回收站", TYPE_TRASH, ""),
+            ("应用启动器", TYPE_LAUNCHER, ""), ("媒体控制", TYPE_MEDIA, ""),
+            ("相册", TYPE_GALLERY, ""), ("系统信息", TYPE_SYSINFO, ""),
+            ("RSS", TYPE_RSS, ""), ("Dock栏", TYPE_DOCK, ""),
+        ]
+        for label, t, cmd in _simple:
+            act = menu.addAction(label)
+            act.triggered.connect(lambda _, tp=t, c=cmd: self._quick_add(tp, c))
+
+        menu.addSeparator()
+
+        clock_sub = menu.addMenu("时钟")
+        clock_sub.setStyleSheet(_style)
+        for sub_id, sub_name in CLOCK_SUB_LABELS.items():
+            act = clock_sub.addAction(sub_name)
+            act.triggered.connect(lambda _, s=sub_id: self._quick_add(TYPE_CLOCK, s))
+
+        mon_sub = menu.addMenu("系统监控")
+        mon_sub.setStyleSheet(_style)
+        for sub_id, sub_name in MONITOR_SUB_LABELS.items():
+            act = mon_sub.addAction(sub_name)
+            act.triggered.connect(lambda _, s=sub_id: self._quick_add(TYPE_MONITOR, s))
+
+        weather_act = menu.addAction("天气")
+        weather_act.triggered.connect(lambda: self._quick_add(TYPE_WEATHER))
+
+        menu.addSeparator()
+        for label, t in [("CMD 命令", TYPE_CMD), ("CMD 窗口", TYPE_CMD_WINDOW), ("快捷方式", TYPE_SHORTCUT)]:
+            act = menu.addAction(label)
+            act.triggered.connect(lambda _, tp=t: self._quick_add(tp))
+
+        btn = self.sender()
+        if btn:
+            menu.exec_(btn.mapToGlobal(btn.rect().bottomLeft()))
+        else:
+            menu.exec_(self.cursor().pos())
+
+    def _on_settings(self):
+        from fastpanel.dialogs.settings_dlg import SettingsDialog
+        dlg = SettingsDialog(self)
+        dlg.exec_()
+
     def _ctx_menu_style(self):
         return f"""
             QMenu {{ background: {C['mantle']}; color: {C['text']}; border: 1px solid {C['surface1']}; border-radius: 8px; padding: 6px; }}
@@ -328,13 +390,13 @@ class _PanelWindow(QMainWindow):
         add_menu.setStyleSheet(_style)
 
         _simple = [
-            ("📋 剪贴板", TYPE_CLIPBOARD, ""), ("📝 便签", TYPE_NOTE, ""),
-            ("✅ 待办", TYPE_TODO, ""), ("🎛 快捷操作", TYPE_QUICKACTION, ""),
-            ("📅 日历", TYPE_CALENDAR, ""), ("🔢 计算器", TYPE_CALC, ""),
-            ("🔖 书签", TYPE_BOOKMARK, ""), ("🗑 回收站", TYPE_TRASH, ""),
-            ("🚀 应用启动器", TYPE_LAUNCHER, ""), ("🎵 媒体控制", TYPE_MEDIA, ""),
-            ("🖼 相册", TYPE_GALLERY, ""), ("💻 系统信息", TYPE_SYSINFO, ""),
-            ("📰 RSS", TYPE_RSS, ""), ("📌 Dock栏", TYPE_DOCK, ""),
+            ("剪贴板", TYPE_CLIPBOARD, ""), ("便签", TYPE_NOTE, ""),
+            ("待办", TYPE_TODO, ""), ("快捷操作", TYPE_QUICKACTION, ""),
+            ("日历", TYPE_CALENDAR, ""), ("计算器", TYPE_CALC, ""),
+            ("书签", TYPE_BOOKMARK, ""), ("回收站", TYPE_TRASH, ""),
+            ("应用启动器", TYPE_LAUNCHER, ""), ("媒体控制", TYPE_MEDIA, ""),
+            ("相册", TYPE_GALLERY, ""), ("系统信息", TYPE_SYSINFO, ""),
+            ("RSS", TYPE_RSS, ""), ("Dock栏", TYPE_DOCK, ""),
         ]
         for label, t, cmd in _simple:
             act = add_menu.addAction(label)
@@ -342,23 +404,23 @@ class _PanelWindow(QMainWindow):
 
         add_menu.addSeparator()
 
-        clock_sub = add_menu.addMenu("🕐 时钟")
+        clock_sub = add_menu.addMenu("时钟")
         clock_sub.setStyleSheet(_style)
         for sub_id, sub_name in CLOCK_SUB_LABELS.items():
             act = clock_sub.addAction(sub_name)
             act.triggered.connect(lambda _, s=sub_id: self._quick_add(TYPE_CLOCK, s))
 
-        mon_sub = add_menu.addMenu("📊 系统监控")
+        mon_sub = add_menu.addMenu("系统监控")
         mon_sub.setStyleSheet(_style)
         for sub_id, sub_name in MONITOR_SUB_LABELS.items():
             act = mon_sub.addAction(sub_name)
             act.triggered.connect(lambda _, s=sub_id: self._quick_add(TYPE_MONITOR, s))
 
-        weather_act = add_menu.addAction("🌤 天气")
+        weather_act = add_menu.addAction("天气")
         weather_act.triggered.connect(lambda: self._quick_add(TYPE_WEATHER))
 
         add_menu.addSeparator()
-        for label, t in [("⌨ CMD 命令", TYPE_CMD), ("🖥 CMD 窗口", TYPE_CMD_WINDOW), ("🔗 快捷方式", TYPE_SHORTCUT)]:
+        for label, t in [("CMD 命令", TYPE_CMD), ("CMD 窗口", TYPE_CMD_WINDOW), ("快捷方式", TYPE_SHORTCUT)]:
             act = add_menu.addAction(label)
             act.triggered.connect(lambda _, tp=t: self._quick_add(tp))
 

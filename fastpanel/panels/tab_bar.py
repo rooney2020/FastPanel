@@ -31,7 +31,7 @@ class PanelTabBar(QFrame):
             QMenu::item {{ color:{C['text']}; padding:6px 24px 6px 12px; font-size:12px; }}
             QMenu::item:selected {{ background:{C['surface1']}; }}
         """)
-        ah = menu.addAction("📌  自动隐藏")
+        ah = menu.addAction("自动隐藏")
         a = menu.exec_(self.mapToGlobal(pos))
         if a == ah:
             self.autohide_toggled.emit()
@@ -69,8 +69,8 @@ class PanelTabBar(QFrame):
             QMenu::item:selected {{ background:{C['surface1']}; }}
             QMenu::separator {{ height:1px; background:{C['surface0']}; margin:3px 6px; }}
         """)
-        ra = menu.addAction("✏  重命名"); ca = menu.addAction("📋  复制")
-        menu.addSeparator(); da = menu.addAction("🗑  删除")
+        ra = menu.addAction("重命名"); ca = menu.addAction("复制")
+        menu.addSeparator(); da = menu.addAction("删除")
         a = menu.exec_(self._tabs[idx].mapToGlobal(pos))
         if a == ra: self.rename_requested.emit(idx)
         elif a == ca: self.copy_requested.emit(idx)

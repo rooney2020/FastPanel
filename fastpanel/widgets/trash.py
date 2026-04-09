@@ -35,7 +35,11 @@ class TrashWidget(CompBase):
     def _build_ui(self):
         lay = QVBoxLayout(self); lay.setContentsMargins(16, 12, 16, 12); lay.setSpacing(6)
         top = QHBoxLayout()
-        self._icon_lbl = QLabel("🗑️")
+        from fastpanel.theme import svg_pixmap as _sp
+        self._icon_lbl = QLabel()
+        _pm = _sp("trash", C['text'], 36)
+        if not _pm.isNull():
+            self._icon_lbl.setPixmap(_pm)
         self._icon_lbl.setStyleSheet("font-size:32px;background:transparent;")
         top.addWidget(self._icon_lbl)
         info = QVBoxLayout(); info.setSpacing(2)

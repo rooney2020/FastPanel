@@ -24,7 +24,7 @@ class SettingsDialog(QDialog):
         self.setStyleSheet(_dialog_style())
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
-        heading = QLabel("⚙  设置"); heading.setObjectName("heading")
+        heading = QLabel("设置"); heading.setObjectName("heading")
         heading.setContentsMargins(28, 20, 28, 12)
         lay.addWidget(heading)
 

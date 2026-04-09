@@ -1,2 +1,3 @@
 PyQt5>=5.15
 vosk>=0.3.45
+setproctitle>=1.3

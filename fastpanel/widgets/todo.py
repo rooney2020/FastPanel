@@ -80,7 +80,7 @@ class TodoWidget(CompBase):
         root.setContentsMargins(10, 8, 10, 8); root.setSpacing(6)
 
         header = QHBoxLayout(); header.setSpacing(4)
-        title = QLabel("📋 待办事项")
+        title = QLabel("待办事项")
         title.setStyleSheet(f"color:{C['text']}; font-size:13px; font-weight:bold; background:transparent; border:none;")
         header.addWidget(title)
         header.addStretch()

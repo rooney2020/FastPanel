@@ -24,7 +24,7 @@ class ExportDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 20, 24, 20); lay.setSpacing(12)
 
-        heading = QLabel("📤  选择导出内容")
+        heading = QLabel("选择导出内容")
         heading.setObjectName("heading")
         lay.addWidget(heading)
 
@@ -49,7 +49,7 @@ class ExportDialog(QDialog):
         self._panel_chks = []
         self._comp_chks = []
         for pi, pd in enumerate(panels_data):
-            p_chk = QCheckBox(f"📁 {pd.name}")
+            p_chk = QCheckBox(pd.name)
             p_chk.setChecked(True)
             p_chk.setStyleSheet(f"font-weight: bold; color: {C['text']};")
             self._tree_layout.addWidget(p_chk)

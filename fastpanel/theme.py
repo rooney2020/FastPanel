@@ -1,5 +1,63 @@
+import os
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPixmap, QPainter, QIcon
+from PyQt5.QtSvg import QSvgRenderer
 from fastpanel.settings import C, _settings
 from fastpanel.constants import ARROW_PATH, CHECK_PATH
+
+_ICON_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "assets", "icons")
+
+
+def svg_icon(name, color=None, size=18):
+    """Load an SVG icon from assets/icons, recoloring stroke/fill to `color`.
+    Returns a QIcon (possibly null if the file is missing)."""
+    if color is None:
+        color = C['text']
+    path = os.path.join(_ICON_DIR, f"{name}.svg")
+    if not os.path.isfile(path):
+        return QIcon()
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            svg = f.read()
+        svg = svg.replace('stroke="currentColor"', f'stroke="{color}"')
+        svg = svg.replace('fill="currentColor"', f'fill="{color}"')
+        renderer = QSvgRenderer(svg.encode('utf-8'))
+        if not renderer.isValid():
+            return QIcon()
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        renderer.render(p)
+        p.end()
+        return QIcon(pm)
+    except Exception:
+        return QIcon()
+
+
+def svg_pixmap(name, color=None, size=18):
+    """Like svg_icon but returns a QPixmap (possibly null)."""
+    if color is None:
+        color = C['text']
+    path = os.path.join(_ICON_DIR, f"{name}.svg")
+    if not os.path.isfile(path):
+        return QPixmap()
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            svg = f.read()
+        svg = svg.replace('stroke="currentColor"', f'stroke="{color}"')
+        svg = svg.replace('fill="currentColor"', f'fill="{color}"')
+        renderer = QSvgRenderer(svg.encode('utf-8'))
+        if not renderer.isValid():
+            return QPixmap()
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        renderer.render(p)
+        p.end()
+        return pm
+    except Exception:
+        return QPixmap()
 
 def _hex_to_rgba(hex_color, alpha):
     h = hex_color.lstrip('#')
@@ -242,6 +300,14 @@ def _style_combobox(combo):
             view.setPalette(pal)
             view.setAutoFillBackground(True)
             view.setStyleSheet(_combobox_popup_style())
+            for child in container.children():
+                cls = child.metaObject().className()
+                if 'Scroller' in cls or 'scroller' in cls:
+                    child.setPalette(pal)
+                    child.setAutoFillBackground(True)
+                    child.setStyleSheet(
+                        f"background: {C['surface0']}; border: none; color: {C['subtext0']};"
+                    )
 
     _cls_name = f"_StyledCB_{id(combo)}"
     _styled_cls = type(_cls_name, (_QCB,), {

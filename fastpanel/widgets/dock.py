@@ -123,7 +123,12 @@ class _SystemAppDialog(QDialog):
                 pm = QPixmap(app["icon"]).scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 icon_lbl.setPixmap(pm)
             else:
-                icon_lbl.setText("🖥️")
+                from fastpanel.theme import svg_pixmap as _sp
+                _pm = _sp("monitor", C['text'], 24)
+                if not _pm.isNull():
+                    icon_lbl.setPixmap(_pm)
+                else:
+                    icon_lbl.setText("App")
                 icon_lbl.setStyleSheet("font-size:18px; background:transparent; border:none;")
             icon_lbl.setAlignment(Qt.AlignCenter)
             hl.addWidget(icon_lbl)
@@ -380,11 +385,11 @@ class DockWidget(CompBase):
         """)
         add_act = menu.addAction("➕ 添加项目")
         menu.addSeparator()
-        edit_act = menu.addAction("✏️ 修改")
-        del_act = menu.addAction("🗑️ 删除")
+        edit_act = menu.addAction("修改")
+        del_act = menu.addAction("删除")
         if self._group_id:
             menu.addSeparator()
-            ungrp_act = menu.addAction("📤 解除组合")
+            ungrp_act = menu.addAction("解除组合")
         else:
             ungrp_act = None
         act = menu.exec_(e.globalPos())
@@ -462,8 +467,8 @@ class _DockIcon(QWidget):
             QMenu::item {{ padding: 6px 16px; border-radius: 4px; }}
             QMenu::item:selected {{ background: {C['surface1']}; }}
         """)
-        edit_act = menu.addAction("✏️ 编辑")
-        del_act = menu.addAction("🗑️ 移除")
+        edit_act = menu.addAction("编辑")
+        del_act = menu.addAction("移除")
         act = menu.exec_(e.globalPos())
         if act == edit_act:
             self.edit_requested.emit(self._idx)
@@ -481,8 +486,8 @@ class _DockIcon(QWidget):
             scaled = self._pm.scaled(s, s, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             p.drawPixmap(cx - scaled.width() // 2, cy - scaled.height() // 2, scaled)
         else:
-            sub_icons = {SUB_APP: "🖥️", SUB_SCRIPT: "📜", SUB_FILE: "📄"}
-            icon_ch = sub_icons.get(self._item.get("sub_type", SUB_APP), "🔗")
+            sub_icons = {SUB_APP: "App", SUB_SCRIPT: "Scr", SUB_FILE: "File"}
+            icon_ch = sub_icons.get(self._item.get("sub_type", SUB_APP), "Lnk")
             f = p.font()
             f.setPixelSize(int(24 * self._scale))
             p.setFont(f)
